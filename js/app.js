@@ -15,6 +15,14 @@ const App = {
      * Inisialisasi awal aplikasi
      */
     init() {
+        if (!StorageService.isReady()) {
+            Utils.showToast(
+                StorageService.getInitializationError() || 'Data OMI belum siap. Muat ulang aplikasi untuk mencoba kembali.',
+                'error'
+            );
+            return;
+        }
+
         // Periksa apakah sudah ada sesi aktif di sessionStorage
         this.checkAuthState();
 
@@ -43,6 +51,9 @@ const App = {
                 CatsModule.searchQuery = '';
                 CatsModule.filterBreed = '';
                 CatsModule.filterGender = '';
+            }
+            if (typeof BoardingModule !== 'undefined') {
+                BoardingModule.currentUser = null;
             }
             this.switchAuthTab('login');
         } else {
@@ -114,6 +125,7 @@ const App = {
                 { id: 'cats', label: 'Data Kucing & Pemilik', icon: '🐱' },
                 { id: 'reservations', label: 'Manajemen Reservasi', icon: '📅' },
                 { id: 'boarding', label: 'Monitoring Penitipan', icon: '🏨' },
+                { id: 'reports', label: 'Laporan Harian', icon: '📝' },
                 { id: 'pickup', label: 'Layanan Antar-Jemput', icon: '🚗' },
                 { id: 'payments', label: 'Laporan & Pembayaran', icon: '💰' }
             ];
@@ -136,6 +148,7 @@ const App = {
                 { id: 'dashboard', label: 'Ruang Kucing Saya', icon: '🐾', active: true },
                 { id: 'my-cats', label: 'Profil Kucing Saya', icon: '🐱' },
                 { id: 'new-reservation', label: 'Reservasi Penitipan', icon: '➕' },
+                { id: 'my-boarding', label: 'Penitipan Saya', icon: '🏨' },
                 { id: 'my-reports', label: 'Laporan Harian Kucing', icon: '📜' },
                 { id: 'my-billing', label: 'Status Pembayaran', icon: '💳' }
             ];
@@ -166,10 +179,10 @@ const App = {
 
     getAllowedModules(role) {
         const permissions = {
-            owner: ['dashboard', 'cats', 'reservations', 'boarding', 'pickup', 'payments'],
+            owner: ['dashboard', 'cats', 'reservations', 'boarding', 'reports', 'pickup', 'payments'],
             staff_ops: ['dashboard', 'cats', 'reservations', 'boarding', 'reports'],
             staff_driver: ['dashboard', 'pickup', 'history'],
-            customer: ['dashboard', 'my-cats', 'new-reservation', 'my-reports', 'my-billing']
+            customer: ['dashboard', 'my-cats', 'new-reservation', 'my-boarding', 'my-reports', 'my-billing']
         };
         return permissions[role] || [];
     },
@@ -202,6 +215,10 @@ const App = {
             CatsModule.render(contentContainer, this.currentUser);
         } else if (moduleId === 'reservations' || moduleId === 'new-reservation') {
             ReservationsModule.render(contentContainer, this.currentUser);
+        } else if (moduleId === 'boarding' || moduleId === 'my-boarding') {
+            BoardingModule.render(contentContainer, this.currentUser, 'stays');
+        } else if (moduleId === 'reports' || moduleId === 'my-reports') {
+            BoardingModule.render(contentContainer, this.currentUser, 'reports');
         } else {
             // Tampilan placeholder informatif untuk modul tahap selanjutnya
             contentContainer.innerHTML = `

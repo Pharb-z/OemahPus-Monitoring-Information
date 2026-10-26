@@ -55,7 +55,16 @@ const DashboardModule = {
         const activities = StorageService.getRecentActivities();
 
         // 1. Perhitungan Statistik Dinamis
-        const activeStays = reservations.filter(r => r.status === 'Sedang Menginap');
+        const activeStays = StorageService.getActiveBoardingStays().map(stay => {
+            const reservation = reservations.find(item => item.id === stay.reservationId) || {};
+            return {
+                ...stay,
+                roomNumber: stay.kennel,
+                checkOutDate: stay.plannedCheckOutDate,
+                needPickup: reservation.needPickup,
+                paymentStatus: reservation.paymentStatus || 'Belum dicatat'
+            };
+        });
         const pendingConfirm = reservations.filter(r => r.status === 'Menunggu Konfirmasi');
         const totalCapacity = Number(settings.totalCapacity) || 10;
         const availableRooms = Math.max(0, totalCapacity - activeStays.length);
@@ -254,12 +263,21 @@ const DashboardModule = {
         const reservations = StorageService.getReservations();
         const cats = StorageService.getCats();
         const reports = StorageService.getDailyReports();
-        const activeStays = reservations.filter(r => r.status === 'Sedang Menginap');
-        const confirmedReservations = reservations.filter(r => r.status === 'Dikonfirmasi');
-        const todayDate = new Date().toISOString().split('T')[0];
+        const activeStays = StorageService.getActiveBoardingStays().map(stay => ({
+            ...stay,
+            roomNumber: stay.kennel,
+            checkOutDate: stay.plannedCheckOutDate
+        }));
+        const confirmedReservations = reservations.filter(r =>
+            r.status === 'Dikonfirmasi' && !StorageService.getBoardingStayByReservationId(r.id)
+        );
+        const todayDate = StorageService.getLocalDateString(new Date());
 
         // Laporan harian yang sudah dibuat hari ini
-        const reportsToday = reports.filter(rep => rep.date === todayDate);
+        const activeStayIds = activeStays.map(stay => stay.id);
+        const reportsToday = reports.filter(rep =>
+            rep.date === todayDate && activeStayIds.includes(rep.boardingStayId)
+        );
         const reportProgressPercent = activeStays.length > 0 
             ? Math.round((reportsToday.length / activeStays.length) * 100) 
             : 100;
@@ -345,7 +363,7 @@ const DashboardModule = {
                             ${activeStays.map(r => {
                                 const catData = cats.find(c => c.id === r.catId) || {};
                                 const initCheck = catData.initialCheck || {};
-                                const hasReport = reports.some(rep => rep.catId === r.catId && rep.date === todayDate);
+                                const hasReport = reports.some(rep => rep.boardingStayId === r.id && rep.date === todayDate);
 
                                 return `
                                     <tr>
@@ -544,7 +562,19 @@ const DashboardModule = {
         const myReports = allReports.filter(rep => myCatIds.includes(rep.catId));
         const myPickups = allPickups.filter(p => myReservations.some(r => r.id === p.reservationId));
 
-        const activeStay = myReservations.find(r => r.status === 'Sedang Menginap');
+        const activeStayRecord = StorageService.getActiveBoardingStays()
+            .find(stay => myCatIds.includes(stay.catId));
+        const activeReservation = activeStayRecord
+            ? myReservations.find(reservation => reservation.id === activeStayRecord.reservationId)
+            : null;
+        const activeStay = activeStayRecord ? {
+            ...activeStayRecord,
+            roomNumber: activeStayRecord.kennel,
+            checkInDate: activeStayRecord.checkInDate,
+            checkOutDate: activeStayRecord.plannedCheckOutDate,
+            needPickup: activeReservation && activeReservation.needPickup,
+            paymentStatus: activeReservation ? activeReservation.paymentStatus : 'Belum dicatat'
+        } : null;
 
         // Total akumulasi tagihan simulasi
         const totalEstimatedBill = myReservations.reduce((acc, curr) => {

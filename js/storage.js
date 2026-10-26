@@ -8,10 +8,18 @@ const StorageKeys = {
     USERS: 'omi_users_data',
     CATS: 'omi_cats_data',
     RESERVATIONS: 'omi_reservations_data',
+    BOARDING_STAYS: 'omi_boarding_stays_data',
     DAILY_REPORTS: 'omi_daily_reports_data',
     PICKUPS: 'omi_pickups_data',
     SETTINGS: 'omi_hotel_settings'
 };
+
+const BOARDING_MIGRATION_JOURNAL_KEY = 'omi_boarding_migration_journal';
+const BOARDING_MIGRATION_TARGET_KEYS = [
+    StorageKeys.BOARDING_STAYS,
+    StorageKeys.DAILY_REPORTS,
+    StorageKeys.RESERVATIONS
+];
 
 const readStoredData = (key) => {
     try {
@@ -42,13 +50,221 @@ const getStoredSession = () => {
 };
 
 const StorageService = {
+    initializationReady: false,
+    initializationError: '',
+
     /**
      * Inisialisasi data awal (seed data) jika LocalStorage masih kosong
      */
     init() {
-        if (!localStorage.getItem(StorageKeys.USERS)) {
-            this.seedAllData();
+        this.initializationReady = false;
+        this.initializationError = '';
+        try {
+            if (!localStorage.getItem(StorageKeys.USERS)) {
+                if (!this.seedAllData()) {
+                    this.initializationError = 'Data awal OMI tidak dapat disiapkan.';
+                    console.error(this.initializationError);
+                    return false;
+                }
+            }
+            if (!this.migrateBoardingData()) return false;
+            this.initializationReady = true;
+            return true;
+        } catch (error) {
+            console.error('Inisialisasi LocalStorage OMI gagal:', error);
+            this.initializationError = 'Penyimpanan browser tidak tersedia atau tidak dapat diakses.';
+            return false;
         }
+    },
+
+    isReady() {
+        return this.initializationReady;
+    },
+
+    getInitializationError() {
+        return this.initializationError;
+    },
+
+    readMigrationArray(key) {
+        let raw;
+        try {
+            raw = localStorage.getItem(key);
+        } catch (error) {
+            console.error(`Data ${key} tidak dapat dibaca untuk migrasi:`, error);
+            return { success: false, message: `Data ${key} tidak dapat dibaca untuk migrasi.` };
+        }
+        if (raw === null) return { success: true, value: [], missing: true };
+        try {
+            const value = JSON.parse(raw);
+            if (!Array.isArray(value)) {
+                return { success: false, message: `Data ${key} bukan daftar yang valid.` };
+            }
+            return { success: true, value, missing: false };
+        } catch (error) {
+            console.error(`Data ${key} tidak dapat dibaca untuk migrasi:`, error);
+            return { success: false, message: `Data ${key} tidak dapat dibaca untuk migrasi.` };
+        }
+    },
+
+    failBoardingMigration(message) {
+        this.initializationError = message;
+        console.error(message);
+        return false;
+    },
+
+    applyBoardingMigrationJournal(journal) {
+        const validJournal = journal && journal.version === 1 &&
+            journal.targets && typeof journal.targets === 'object' &&
+            !Array.isArray(journal.targets) &&
+            Object.keys(journal.targets).every(key =>
+                BOARDING_MIGRATION_TARGET_KEYS.includes(key) &&
+                Array.isArray(journal.targets[key])
+            );
+        if (!validJournal) {
+            return this.failBoardingMigration(
+                'Jurnal migrasi penitipan tidak valid. Data dipertahankan dan aplikasi dinonaktifkan.'
+            );
+        }
+
+        for (const key of BOARDING_MIGRATION_TARGET_KEYS) {
+            if (!Object.prototype.hasOwnProperty.call(journal.targets, key)) continue;
+            if (!writeStoredData(key, journal.targets[key])) {
+                return this.failBoardingMigration(
+                    `Migrasi penitipan tertunda karena data ${key} gagal disimpan. Muat ulang aplikasi untuk mencoba pemulihan.`
+                );
+            }
+        }
+
+        try {
+            localStorage.removeItem(BOARDING_MIGRATION_JOURNAL_KEY);
+            if (localStorage.getItem(BOARDING_MIGRATION_JOURNAL_KEY) !== null) {
+                return this.failBoardingMigration(
+                    'Migrasi penitipan tersimpan, tetapi jurnal pemulihan belum dapat dibersihkan. Muat ulang aplikasi untuk mencoba kembali.'
+                );
+            }
+        } catch (error) {
+            console.error('Jurnal migrasi penitipan belum dapat dibersihkan:', error);
+            return this.failBoardingMigration(
+                'Migrasi penitipan tersimpan, tetapi jurnal pemulihan belum dapat dibersihkan. Muat ulang aplikasi untuk mencoba kembali.'
+            );
+        }
+        return true;
+    },
+
+    migrateBoardingData() {
+        let journalRaw;
+        try {
+            journalRaw = localStorage.getItem(BOARDING_MIGRATION_JOURNAL_KEY);
+        } catch (error) {
+            console.error('Jurnal migrasi penitipan tidak dapat dibaca:', error);
+            return this.failBoardingMigration('Jurnal migrasi penitipan tidak dapat dibaca.');
+        }
+        if (journalRaw !== null) {
+            let journal;
+            try {
+                journal = JSON.parse(journalRaw);
+            } catch (error) {
+                console.error('Jurnal migrasi penitipan tidak valid:', error);
+                return this.failBoardingMigration(
+                    'Jurnal migrasi penitipan tidak valid. Data dipertahankan dan aplikasi dinonaktifkan.'
+                );
+            }
+            return this.applyBoardingMigrationJournal(journal);
+        }
+
+        const staysResult = this.readMigrationArray(StorageKeys.BOARDING_STAYS);
+        const reservationsResult = this.readMigrationArray(StorageKeys.RESERVATIONS);
+        const reportsResult = this.readMigrationArray(StorageKeys.DAILY_REPORTS);
+        for (const result of [staysResult, reservationsResult, reportsResult]) {
+            if (!result.success) return this.failBoardingMigration(result.message);
+        }
+
+        const stays = staysResult.value;
+        const reservations = reservationsResult.value;
+        const reports = reportsResult.value;
+        let staysChanged = staysResult.missing;
+        let reservationsChanged = false;
+        let reportsChanged = false;
+        const nextStays = [...stays];
+        const nextReservations = reservations.map(reservation => ({ ...reservation }));
+        const nextReports = reports.map(report => ({ ...report }));
+
+        for (const reservation of nextReservations) {
+            if (reservation.status !== 'Sedang Menginap') continue;
+            const matchingStays = nextStays.filter(stay => stay.reservationId === reservation.id);
+            if (matchingStays.length > 1) {
+                return this.failBoardingMigration(
+                    `Migrasi dihentikan: lebih dari satu catatan penitipan terkait reservasi ${reservation.id}.`
+                );
+            }
+            let stay = matchingStays[0];
+            if (!stay) {
+                const stayId = `STAY-${reservation.id}`;
+                if (nextStays.some(item => item.id === stayId)) {
+                    return this.failBoardingMigration(
+                        `Migrasi dihentikan: ID catatan penitipan ${stayId} sudah digunakan.`
+                    );
+                }
+                stay = {
+                    id: stayId,
+                    reservationId: reservation.id,
+                    catId: reservation.catId,
+                    catName: reservation.catName,
+                    ownerId: reservation.ownerId,
+                    ownerName: reservation.ownerName,
+                    kennel: reservation.roomNumber || '',
+                    checkInDate: reservation.checkInDate,
+                    plannedCheckOutDate: reservation.checkOutDate,
+                    checkedInAt: null,
+                    checkedOutAt: null,
+                    actualCheckOutDate: null,
+                    status: 'Sedang Dititipkan',
+                    legacy: true,
+                    legacyReservationStatus: reservation.status
+                };
+                nextStays.push(stay);
+                staysChanged = true;
+            } else if (!stay.legacyReservationStatus) {
+                stay.legacyReservationStatus = reservation.status;
+                staysChanged = true;
+            }
+            reservation.status = 'Dikonfirmasi';
+            reservationsChanged = true;
+        }
+
+        const staysByReservationId = new Map();
+        for (const stay of nextStays) {
+            const relatedStays = staysByReservationId.get(stay.reservationId) || [];
+            relatedStays.push(stay);
+            staysByReservationId.set(stay.reservationId, relatedStays);
+        }
+        for (const report of nextReports) {
+            if (report.boardingStayId || !report.reservationId) continue;
+            const relatedStays = staysByReservationId.get(report.reservationId) || [];
+            if (relatedStays.length > 1) {
+                return this.failBoardingMigration(
+                    `Migrasi dihentikan: laporan ${report.id || '(tanpa ID)'} memiliki lebih dari satu penitipan yang cocok.`
+                );
+            }
+            if (relatedStays.length === 1) {
+                report.boardingStayId = relatedStays[0].id;
+                reportsChanged = true;
+            }
+        }
+
+        const targets = {};
+        if (staysChanged) targets[StorageKeys.BOARDING_STAYS] = nextStays;
+        if (reportsChanged) targets[StorageKeys.DAILY_REPORTS] = nextReports;
+        if (reservationsChanged) targets[StorageKeys.RESERVATIONS] = nextReservations;
+        if (Object.keys(targets).length === 0) return true;
+
+        const journal = { version: 1, targets };
+        if (!writeStoredData(BOARDING_MIGRATION_JOURNAL_KEY, journal)) {
+            return this.failBoardingMigration(
+                'Jurnal migrasi penitipan gagal disimpan. Data lama tidak diubah.'
+            );
+        }
+        return this.applyBoardingMigrationJournal(journal);
     },
 
     /**
@@ -318,6 +534,7 @@ const StorageService = {
         localStorage.setItem(StorageKeys.USERS, JSON.stringify(initialUsers));
         localStorage.setItem(StorageKeys.CATS, JSON.stringify(initialCats));
         localStorage.setItem(StorageKeys.RESERVATIONS, JSON.stringify(initialReservations));
+        localStorage.removeItem(StorageKeys.BOARDING_STAYS);
         localStorage.setItem(StorageKeys.DAILY_REPORTS, JSON.stringify(initialReports));
         localStorage.setItem(StorageKeys.PICKUPS, JSON.stringify(initialPickups));
         localStorage.setItem(StorageKeys.SETTINGS, JSON.stringify(initialSettings));
@@ -341,6 +558,12 @@ const StorageService = {
                     : [];
         }
         if (key === StorageKeys.RESERVATIONS) {
+            if (['owner', 'staff_ops'].includes(user.role)) return data;
+            if (user.role !== 'customer') return [];
+            const catIds = this.getCats().map(cat => cat.id);
+            return data.filter(item => catIds.includes(item.catId));
+        }
+        if (key === StorageKeys.BOARDING_STAYS) {
             if (['owner', 'staff_ops'].includes(user.role)) return data;
             if (user.role !== 'customer') return [];
             const catIds = this.getCats().map(cat => cat.id);
@@ -389,6 +612,261 @@ const StorageService = {
     getReservationById(reservationId) {
         return this.getReservations().find(reservation => reservation.id === reservationId) || null;
     },
+    getBoardingStays() { return this.get(StorageKeys.BOARDING_STAYS); },
+    getActiveBoardingStays() {
+        return this.getBoardingStays().filter(stay => stay.status === 'Sedang Dititipkan');
+    },
+    getBoardingStayById(stayId) {
+        return this.getBoardingStays().find(stay => stay.id === stayId) || null;
+    },
+    getBoardingStayByReservationId(reservationId) {
+        return this.getBoardingStays().find(stay => stay.reservationId === reservationId) || null;
+    },
+    getDailyReports() { return this.get(StorageKeys.DAILY_REPORTS); },
+    getDailyReportById(reportId) {
+        return this.getDailyReports().find(report => report.id === reportId) || null;
+    },
+    isValidIsoDate(value) {
+        if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+        const [year, month, day] = value.split('-').map(Number);
+        const date = new Date(Date.UTC(year, month - 1, day));
+        return date.getUTCFullYear() === year &&
+            date.getUTCMonth() === month - 1 &&
+            date.getUTCDate() === day;
+    },
+    getLocalDateString(date) {
+        return [
+            date.getFullYear(),
+            String(date.getMonth() + 1).padStart(2, '0'),
+            String(date.getDate()).padStart(2, '0')
+        ].join('-');
+    },
+    getNextLocalDateString(dateString) {
+        const [year, month, day] = dateString.split('-').map(Number);
+        return this.getLocalDateString(new Date(year, month - 1, day + 1));
+    },
+    generateUniqueRecordId(prefix, records) {
+        const existingIds = new Set(records.map(record => record.id));
+        let id;
+        let attempts = 0;
+        do {
+            id = attempts < 20
+                ? Utils.generateId(prefix)
+                : `${prefix}-${Date.now()}-${attempts}`;
+            attempts++;
+        } while (existingIds.has(id));
+        return id;
+    },
+    getReservationCapacityOccupancies() {
+        const today = this.getLocalDateString(new Date());
+        const staysByReservationId = new Map(
+            readStoredData(StorageKeys.BOARDING_STAYS).map(stay => [stay.reservationId, stay])
+        );
+        return readStoredData(StorageKeys.RESERVATIONS)
+            .filter(reservation => {
+                const stay = staysByReservationId.get(reservation.id);
+                if (stay) return ['Sedang Dititipkan', 'Selesai'].includes(stay.status);
+                return !['Dibatalkan', 'Selesai'].includes(reservation.status);
+            })
+            .map(reservation => {
+                const stay = staysByReservationId.get(reservation.id);
+                if (!stay) {
+                    return {
+                        ...reservation,
+                        occupancyStart: reservation.checkInDate,
+                        occupancyEnd: reservation.checkOutDate
+                    };
+                }
+                const occupancyStart = stay.checkInDate ||
+                    (stay.checkedInAt ? this.getLocalDateString(new Date(stay.checkedInAt)) : reservation.checkInDate);
+                const active = stay.status === 'Sedang Dititipkan';
+                const plannedEnd = stay.plannedCheckOutDate || reservation.checkOutDate;
+                const occupancyEnd = active
+                    ? (plannedEnd > today ? plannedEnd : null)
+                    : (stay.actualCheckOutDate || reservation.checkOutDate);
+                return { ...reservation, occupancyStart, occupancyEnd };
+            });
+    },
+    checkInReservation(request = {}) {
+        const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
+        if (!user || !['owner', 'staff_ops'].includes(user.role)) {
+            return { success: false, message: 'Anda tidak memiliki izin melakukan check-in.' };
+        }
+        if (!request || typeof request !== 'object') {
+            return { success: false, message: 'Data check-in tidak valid.' };
+        }
+        const { reservationId, kennel } = request;
+
+        const reservation = readStoredData(StorageKeys.RESERVATIONS)
+            .find(item => item.id === reservationId);
+        if (!reservation || reservation.status !== 'Dikonfirmasi') {
+            return { success: false, message: 'Check-in hanya dapat dilakukan untuk reservasi yang telah dikonfirmasi.' };
+        }
+        if (this.getBoardingStayByReservationId(reservation.id)) {
+            return { success: false, message: 'Reservasi ini sudah memiliki riwayat penitipan dan tidak dapat check-in ulang.' };
+        }
+
+        const today = this.getLocalDateString(new Date());
+        if (!this.isValidIsoDate(reservation.checkInDate) ||
+            !this.isValidIsoDate(reservation.checkOutDate) ||
+            today < reservation.checkInDate || today >= reservation.checkOutDate) {
+            return { success: false, message: 'Check-in hanya dapat dilakukan dalam periode reservasi yang valid.' };
+        }
+        const cat = readStoredData(StorageKeys.CATS).find(item =>
+            item.id === reservation.catId && item.ownerId === reservation.ownerId
+        );
+        if (!cat) {
+            return { success: false, message: 'Data kucing atau pemilik pada reservasi tidak valid.' };
+        }
+
+        const cleanKennel = typeof kennel === 'string' ? kennel.trim() : '';
+        if (!this.isValidKennelIdentifier(cleanKennel)) {
+            return {
+                success: false,
+                message: 'Identitas kandang wajib diawali huruf/angka dan hanya boleh berisi huruf, angka, spasi, titik, garis bawah, atau tanda hubung (maksimal 60 karakter).'
+            };
+        }
+        const activeStays = readStoredData(StorageKeys.BOARDING_STAYS)
+            .filter(stay => stay.status === 'Sedang Dititipkan');
+        if (activeStays.some(stay =>
+            typeof stay.kennel === 'string' && stay.kennel.trim().toLowerCase() === cleanKennel.toLowerCase()
+        )) {
+            return { success: false, message: 'Kandang tersebut sedang digunakan kucing lain.' };
+        }
+
+        const availability = this.checkReservationAvailability({
+            catId: cat.id,
+            checkInDate: today,
+            checkOutDate: this.getNextLocalDateString(today),
+            reservationId: reservation.id
+        });
+        if (!availability.available) return { success: false, message: availability.message };
+
+        const stays = readStoredData(StorageKeys.BOARDING_STAYS);
+        const stay = {
+            id: this.generateUniqueRecordId('STAY', stays),
+            reservationId: reservation.id,
+            catId: cat.id,
+            catName: cat.name,
+            ownerId: cat.ownerId,
+            ownerName: reservation.ownerName,
+            kennel: cleanKennel,
+            checkInDate: today,
+            plannedCheckOutDate: reservation.checkOutDate,
+            checkedInAt: new Date().toISOString(),
+            checkedOutAt: null,
+            actualCheckOutDate: null,
+            status: 'Sedang Dititipkan',
+            createdBy: user.id
+        };
+        stays.push(stay);
+        if (!writeStoredData(StorageKeys.BOARDING_STAYS, stays)) {
+            return { success: false, message: 'Gagal menyimpan check-in. Periksa ruang penyimpanan browser.' };
+        }
+        return { success: true, stay };
+    },
+    isValidKennelIdentifier(value) {
+        return typeof value === 'string' &&
+            value.length >= 1 &&
+            value.length <= 60 &&
+            /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/.test(value);
+    },
+    checkOutBoardingStay(stayId) {
+        const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
+        if (!user || !['owner', 'staff_ops'].includes(user.role)) {
+            return { success: false, message: 'Anda tidak memiliki izin melakukan check-out.' };
+        }
+        const stays = readStoredData(StorageKeys.BOARDING_STAYS);
+        const index = stays.findIndex(stay => stay.id === stayId);
+        if (index < 0 || stays[index].status !== 'Sedang Dititipkan') {
+            return { success: false, message: 'Hanya kucing yang sedang dititipkan dapat menjalani check-out.' };
+        }
+        const checkedOutAt = new Date();
+        stays[index] = {
+            ...stays[index],
+            status: 'Selesai',
+            checkedOutAt: checkedOutAt.toISOString(),
+            actualCheckOutDate: this.getLocalDateString(checkedOutAt)
+        };
+        if (!writeStoredData(StorageKeys.BOARDING_STAYS, stays)) {
+            return { success: false, message: 'Gagal menyimpan check-out. Periksa ruang penyimpanan browser.' };
+        }
+        return { success: true, stay: stays[index] };
+    },
+    saveDailyReport(reportData = {}) {
+        const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
+        if (!user || !['owner', 'staff_ops'].includes(user.role)) {
+            return { success: false, message: 'Anda tidak memiliki izin menyimpan laporan harian.' };
+        }
+        if (!reportData || typeof reportData !== 'object') {
+            return { success: false, message: 'Data laporan harian tidak valid.' };
+        }
+        const stay = this.getBoardingStayById(reportData.boardingStayId);
+        if (!stay || stay.status !== 'Sedang Dititipkan') {
+            return { success: false, message: 'Laporan hanya dapat dibuat atau diperbarui untuk kucing yang sedang dititipkan.' };
+        }
+        const reservation = readStoredData(StorageKeys.RESERVATIONS)
+            .find(item => item.id === stay.reservationId);
+        const cat = readStoredData(StorageKeys.CATS).find(item =>
+            item.id === stay.catId && item.ownerId === stay.ownerId
+        );
+        if (!reservation || !cat || reservation.catId !== stay.catId) {
+            return { success: false, message: 'Data penitipan, reservasi, atau kucing tidak valid.' };
+        }
+        if (!this.isValidIsoDate(reportData.date)) {
+            return { success: false, message: 'Tanggal laporan tidak valid.' };
+        }
+        const today = this.getLocalDateString(new Date());
+        const checkInDate = stay.checkInDate ||
+            (stay.checkedInAt ? this.getLocalDateString(new Date(stay.checkedInAt)) : reservation.checkInDate);
+        if (reportData.date < checkInDate || reportData.date > today) {
+            return { success: false, message: 'Tanggal laporan harus berada pada masa penitipan yang sudah berjalan.' };
+        }
+
+        const fields = ['mealIntake', 'waterIntake', 'urination', 'defecation', 'activityAndMood'];
+        const values = {};
+        for (const field of fields) {
+            const value = typeof reportData[field] === 'string' ? reportData[field].trim() : '';
+            if (!value) return { success: false, message: 'Semua catatan kondisi harian wajib diisi.' };
+            if (value.length > 500) return { success: false, message: 'Setiap catatan maksimal 500 karakter.' };
+            values[field] = value;
+        }
+
+        const reports = readStoredData(StorageKeys.DAILY_REPORTS);
+        const index = reportData.id ? reports.findIndex(report => report.id === reportData.id) : -1;
+        const existing = index >= 0 ? reports[index] : null;
+        if (reportData.id && !existing) return { success: false, message: 'Laporan harian tidak ditemukan.' };
+        if (existing && (existing.boardingStayId !== stay.id ||
+            existing.catId !== stay.catId || existing.reservationId !== stay.reservationId)) {
+            return { success: false, message: 'Laporan tidak terhubung dengan penitipan ini.' };
+        }
+        if (reports.some(report =>
+            report.id !== reportData.id && report.catId === stay.catId && report.date === reportData.date
+        )) {
+            return { success: false, message: 'Laporan untuk kucing ini pada tanggal tersebut sudah ada. Gunakan fitur edit.' };
+        }
+
+        const report = {
+            ...(existing || {}),
+            ...values,
+            id: existing ? existing.id : this.generateUniqueRecordId('REP', reports),
+            boardingStayId: stay.id,
+            reservationId: stay.reservationId,
+            catId: stay.catId,
+            catName: stay.catName,
+            date: reportData.date,
+            recordedBy: existing ? existing.recordedBy : user.name,
+            recordedAt: existing ? existing.recordedAt : new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            updatedBy: user.id
+        };
+        if (existing) reports[index] = report;
+        else reports.push(report);
+        if (!writeStoredData(StorageKeys.DAILY_REPORTS, reports)) {
+            return { success: false, message: 'Gagal menyimpan laporan harian. Periksa ruang penyimpanan browser.' };
+        }
+        return { success: true, report, isNew: !existing };
+    },
     checkReservationAvailability(request = {}) {
         const { catId, checkInDate, checkOutDate, reservationId = null } = request;
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
@@ -396,16 +874,7 @@ const StorageService = {
             return { available: false, message: 'Anda tidak memiliki izin memeriksa ketersediaan.' };
         }
 
-        const datePattern = /^\d{4}-\d{2}-\d{2}$/;
-        const isValidDate = value => {
-            if (typeof value !== 'string' || !datePattern.test(value)) return false;
-            const [year, month, day] = value.split('-').map(Number);
-            const date = new Date(Date.UTC(year, month - 1, day));
-            return date.getUTCFullYear() === year &&
-                date.getUTCMonth() === month - 1 &&
-                date.getUTCDate() === day;
-        };
-        if (!isValidDate(checkInDate) || !isValidDate(checkOutDate)) {
+        if (!this.isValidIsoDate(checkInDate) || !this.isValidIsoDate(checkOutDate)) {
             return { available: false, message: 'Tanggal check-in dan check-out harus valid.' };
         }
         if (checkOutDate <= checkInDate) {
@@ -433,13 +902,13 @@ const StorageService = {
             return { available: false, message: 'Kapasitas kandang belum dikonfigurasi dengan benar.' };
         }
 
-        const reservations = readStoredData(StorageKeys.RESERVATIONS).filter(reservation =>
-            reservation.id !== reservationId && reservation.status !== 'Dibatalkan'
+        const reservations = this.getReservationCapacityOccupancies().filter(reservation =>
+            reservation.id !== reservationId && reservation.occupancyStart
         );
         const sameCatConflict = reservations.find(reservation =>
             reservation.catId === catId &&
-            reservation.checkInDate < checkOutDate &&
-            checkInDate < reservation.checkOutDate
+            reservation.occupancyStart < checkOutDate &&
+            (reservation.occupancyEnd === null || checkInDate < reservation.occupancyEnd)
         );
         if (sameCatConflict) {
             return {
@@ -450,7 +919,8 @@ const StorageService = {
 
         for (let day = checkInDate; day < checkOutDate; ) {
             const occupied = reservations.filter(reservation =>
-                reservation.checkInDate <= day && day < reservation.checkOutDate
+                reservation.occupancyStart <= day &&
+                (reservation.occupancyEnd === null || day < reservation.occupancyEnd)
             ).length;
             if (occupied >= capacity) {
                 return {
@@ -458,13 +928,7 @@ const StorageService = {
                     message: `Kapasitas kandang penuh pada ${day} (${occupied}/${capacity}).`
                 };
             }
-            const [year, month, date] = day.split('-').map(Number);
-            const nextDay = new Date(Date.UTC(year, month - 1, date + 1));
-            day = [
-                nextDay.getUTCFullYear(),
-                String(nextDay.getUTCMonth() + 1).padStart(2, '0'),
-                String(nextDay.getUTCDate()).padStart(2, '0')
-            ].join('-');
+            day = this.getNextLocalDateString(day);
         }
 
         return { available: true, message: 'Kapasitas tersedia.', capacity };
@@ -497,6 +961,10 @@ const StorageService = {
         }
         if (existingReservation && reservationData.catId !== existingReservation.catId) {
             return { success: false, message: 'Kucing pada reservasi tidak dapat diganti.' };
+        }
+        if (existingReservation && readStoredData(StorageKeys.BOARDING_STAYS)
+            .some(stay => stay.reservationId === existingReservation.id)) {
+            return { success: false, message: 'Reservasi yang sudah memiliki riwayat penitipan tidak dapat diedit.' };
         }
 
         const cat = readStoredData(StorageKeys.CATS).find(item => item.id === reservationData.catId);
@@ -549,7 +1017,6 @@ const StorageService = {
         }
         return { success: true, reservation, isNew: !existingReservation };
     },
-    getDailyReports() { return this.get(StorageKeys.DAILY_REPORTS); },
     getPickups() { return this.get(StorageKeys.PICKUPS); },
     getSettings() {
         const settings = this.get(StorageKeys.SETTINGS);
@@ -725,15 +1192,34 @@ const StorageService = {
      */
     deleteCat(catId) {
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
-        if (!user || !['owner', 'staff_ops', 'customer'].includes(user.role)) return false;
+        if (!user || !['owner', 'staff_ops', 'customer'].includes(user.role)) {
+            return { success: false, message: 'Anda tidak memiliki izin menghapus data kucing.' };
+        }
         const cats = readStoredData(StorageKeys.CATS);
         const cat = cats.find(item => item.id === catId);
-        if (!cat || (user.role === 'customer' && cat.ownerId !== user.id)) return false;
+        if (!cat || (user.role === 'customer' && cat.ownerId !== user.id)) {
+            return { success: false, message: 'Data kucing tidak ditemukan atau bukan milik Anda.' };
+        }
+        const hasReservationHistory = readStoredData(StorageKeys.RESERVATIONS)
+            .some(reservation => reservation.catId === catId);
+        const hasBoardingHistory = readStoredData(StorageKeys.BOARDING_STAYS)
+            .some(stay => stay.catId === catId);
+        const hasReportHistory = readStoredData(StorageKeys.DAILY_REPORTS)
+            .some(report => report.catId === catId);
+        if (hasReservationHistory || hasBoardingHistory || hasReportHistory) {
+            return {
+                success: false,
+                message: 'Data kucing tidak dapat dihapus karena memiliki reservasi, riwayat penitipan, atau laporan. Riwayat tersebut perlu dipertahankan.'
+            };
+        }
         const filtered = cats.filter(c => c.id !== catId);
         if (filtered.length !== cats.length) {
-            return writeStoredData(StorageKeys.CATS, filtered);
+            if (!writeStoredData(StorageKeys.CATS, filtered)) {
+                return { success: false, message: 'Data kucing gagal dihapus. Periksa ruang penyimpanan browser.' };
+            }
+            return { success: true };
         }
-        return false;
+        return { success: false, message: 'Data kucing tidak ditemukan.' };
     },
 
     /**
@@ -759,7 +1245,10 @@ const StorageService = {
         if (!user || user.role !== 'owner' || !['Dikonfirmasi', 'Dibatalkan'].includes(newStatus)) return false;
         const reservations = readStoredData(StorageKeys.RESERVATIONS);
         const index = reservations.findIndex(r => r.id === reservationId);
+        const hasBoardingStay = readStoredData(StorageKeys.BOARDING_STAYS)
+            .some(stay => stay.reservationId === reservationId);
         const validTransition = index !== -1 &&
+            !hasBoardingStay &&
             ((reservations[index].status === 'Menunggu Konfirmasi' && ['Dikonfirmasi', 'Dibatalkan'].includes(newStatus)) ||
                 (reservations[index].status === 'Dikonfirmasi' && newStatus === 'Dibatalkan'));
         if (validTransition) {
@@ -775,20 +1264,13 @@ const StorageService = {
     getRecentActivities() {
         const activities = [];
         const reservations = this.getReservations();
+        const boardingStays = this.getActiveBoardingStays();
         const reports = this.getDailyReports();
         const pickups = this.getPickups();
 
         // 1. Aktivitas Reservasi
         reservations.forEach(r => {
-            if (r.status === 'Sedang Menginap') {
-                activities.push({
-                    icon: '🏨',
-                    title: `Kucing Menginap: ${r.catName}`,
-                    desc: `Telah check-in di ${r.roomNumber || 'Kandang'} atas nama ${r.ownerName}.`,
-                    time: r.checkInDate,
-                    sortDate: new Date(r.checkInDate).getTime()
-                });
-            } else if (r.status === 'Menunggu Konfirmasi') {
+            if (r.status === 'Menunggu Konfirmasi') {
                 activities.push({
                     icon: '⏳',
                     title: `Pengajuan Reservasi: ${r.catName}`,
@@ -805,6 +1287,16 @@ const StorageService = {
                     sortDate: new Date(r.createdAt || r.checkInDate).getTime()
                 });
             }
+        });
+
+        boardingStays.forEach(stay => {
+            activities.push({
+                icon: '🏨',
+                title: `Kucing Menginap: ${stay.catName}`,
+                desc: `Telah check-in di ${stay.kennel || 'Kandang'} atas nama ${stay.ownerName}.`,
+                time: stay.checkedInAt || stay.checkInDate,
+                sortDate: new Date(stay.checkedInAt || stay.checkInDate).getTime()
+            });
         });
 
         // 2. Aktivitas Laporan Harian
@@ -842,8 +1334,14 @@ const StorageService = {
             console.error('Reset data hanya diizinkan untuk Owner.');
             return false;
         }
+        this.initializationReady = false;
+        this.initializationError = '';
         Object.values(StorageKeys).forEach(key => localStorage.removeItem(key));
-        return this.seedAllData();
+        localStorage.removeItem(BOARDING_MIGRATION_JOURNAL_KEY);
+        const seeded = this.seedAllData();
+        if (!seeded || !this.migrateBoardingData()) return false;
+        this.initializationReady = true;
+        return true;
     }
 };
 

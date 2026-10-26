@@ -280,8 +280,9 @@ const CatsModule = {
                 const catId = btn.getAttribute('data-id');
                 const cat = StorageService.getCatById(catId);
                 if (cat && confirm(`Apakah Anda yakin ingin menghapus data kucing "${cat.name}"?`)) {
-                    if (!StorageService.deleteCat(catId)) {
-                        Utils.showToast('Data kucing tidak dapat dihapus.', 'error');
+                    const result = StorageService.deleteCat(catId);
+                    if (!result.success) {
+                        Utils.showToast(result.message, 'error');
                         return;
                     }
                     Utils.showToast(`Kucing ${cat.name} berhasil dihapus.`, 'info');

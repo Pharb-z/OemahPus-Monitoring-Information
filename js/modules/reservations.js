@@ -72,38 +72,43 @@ const ReservationsModule = {
                                 <th>Check-Out</th>
                                 <th>Lama Inap</th>
                                 <th>Status</th>
+                                <th>Status Penitipan</th>
                                 <th>Aksi</th>
                             </tr>
                         </thead>
                         <tbody>
-                            ${reservations.map(reservation => `
-                                <tr>
-                                    <td><strong>${Utils.escapeHtml(reservation.id)}</strong></td>
-                                    <td>
-                                        <strong>🐱 ${Utils.escapeHtml(reservation.catName)}</strong><br>
-                                        <small class="text-muted">${Utils.escapeHtml(reservation.ownerName)}</small>
-                                    </td>
-                                    <td>${Utils.formatDate(reservation.checkInDate)}</td>
-                                    <td>${Utils.formatDate(reservation.checkOutDate)}</td>
-                                    <td>${this.getStayLength(reservation.checkInDate, reservation.checkOutDate)} malam</td>
-                                    <td><span class="badge ${this.getStatusBadge(reservation.status)}">${Utils.escapeHtml(reservation.status)}</span></td>
-                                    <td>
-                                        <div style="display: flex; flex-wrap: wrap; gap: 0.4rem;">
-                                            <button type="button" class="btn btn-outline btn-sm btn-reservation-detail" data-id="${Utils.escapeHtml(reservation.id)}">Detail</button>
-                                            ${canManage && ['Menunggu Konfirmasi', 'Dikonfirmasi'].includes(reservation.status) ? `
-                                                <button type="button" class="btn btn-outline btn-sm btn-reservation-edit" data-id="${Utils.escapeHtml(reservation.id)}">Edit</button>
-                                            ` : ''}
-                                            ${canManage && reservation.status === 'Menunggu Konfirmasi' ? `
-                                                <button type="button" class="btn btn-primary btn-sm btn-reservation-confirm" data-id="${Utils.escapeHtml(reservation.id)}">Konfirmasi</button>
-                                            ` : ''}
-                                            ${canManage && ['Menunggu Konfirmasi', 'Dikonfirmasi'].includes(reservation.status) ? `
-                                                <button type="button" class="btn btn-danger-outline btn-sm btn-reservation-cancel" data-id="${Utils.escapeHtml(reservation.id)}">Batalkan</button>
-                                            ` : ''}
-                                        </div>
-                                    </td>
-                                </tr>
-                            `).join('') || `
-                                <tr><td colspan="7" class="text-center text-muted p-4">Belum ada reservasi untuk ditampilkan.</td></tr>
+                            ${reservations.map(reservation => {
+                                const stay = StorageService.getBoardingStayByReservationId(reservation.id);
+                                return `
+                                    <tr>
+                                        <td><strong>${Utils.escapeHtml(reservation.id)}</strong></td>
+                                        <td>
+                                            <strong>🐱 ${Utils.escapeHtml(reservation.catName)}</strong><br>
+                                            <small class="text-muted">${Utils.escapeHtml(reservation.ownerName)}</small>
+                                        </td>
+                                        <td>${Utils.formatDate(reservation.checkInDate)}</td>
+                                        <td>${Utils.formatDate(reservation.checkOutDate)}</td>
+                                        <td>${this.getStayLength(reservation.checkInDate, reservation.checkOutDate)} malam</td>
+                                        <td><span class="badge ${this.getStatusBadge(reservation.status)}">${Utils.escapeHtml(reservation.status)}</span></td>
+                                        <td><span class="badge ${stay && stay.status === 'Sedang Dititipkan' ? 'badge-success' : 'badge-light'}">${Utils.escapeHtml(stay ? stay.status : 'Belum Check-In')}</span></td>
+                                        <td>
+                                            <div style="display: flex; flex-wrap: wrap; gap: 0.4rem;">
+                                                <button type="button" class="btn btn-outline btn-sm btn-reservation-detail" data-id="${Utils.escapeHtml(reservation.id)}">Detail</button>
+                                                ${canManage && !stay && ['Menunggu Konfirmasi', 'Dikonfirmasi'].includes(reservation.status) ? `
+                                                    <button type="button" class="btn btn-outline btn-sm btn-reservation-edit" data-id="${Utils.escapeHtml(reservation.id)}">Edit</button>
+                                                ` : ''}
+                                                ${canManage && reservation.status === 'Menunggu Konfirmasi' ? `
+                                                    <button type="button" class="btn btn-primary btn-sm btn-reservation-confirm" data-id="${Utils.escapeHtml(reservation.id)}">Konfirmasi</button>
+                                                ` : ''}
+                                                ${canManage && !stay && ['Menunggu Konfirmasi', 'Dikonfirmasi'].includes(reservation.status) ? `
+                                                    <button type="button" class="btn btn-danger-outline btn-sm btn-reservation-cancel" data-id="${Utils.escapeHtml(reservation.id)}">Batalkan</button>
+                                                ` : ''}
+                                            </div>
+                                        </td>
+                                    </tr>
+                                `;
+                            }).join('') || `
+                                <tr><td colspan="8" class="text-center text-muted p-4">Belum ada reservasi untuk ditampilkan.</td></tr>
                             `}
                         </tbody>
                     </table>
@@ -162,7 +167,8 @@ const ReservationsModule = {
     openForm(reservation = null) {
         const user = AuthService.getCurrentUser();
         if (!user || !['owner', 'customer'].includes(user.role) ||
-            (reservation && user.role !== 'owner')) {
+            (reservation && user.role !== 'owner') ||
+            (reservation && StorageService.getBoardingStayByReservationId(reservation.id))) {
             Utils.showToast('Anda tidak memiliki izin membuat atau mengedit reservasi.', 'error');
             return;
         }
@@ -290,6 +296,7 @@ const ReservationsModule = {
             Utils.showToast('Reservasi tidak ditemukan atau bukan milik Anda.', 'error');
             return;
         }
+        const stay = StorageService.getBoardingStayByReservationId(reservationId);
         const modal = document.getElementById('reservation-modal-container');
         if (!modal) return;
         modal.innerHTML = `
@@ -307,6 +314,8 @@ const ReservationsModule = {
                             <p><strong>Check-out:</strong> ${Utils.formatDate(reservation.checkOutDate)} (eksklusif)</p>
                             <p><strong>Lama inap:</strong> ${this.getStayLength(reservation.checkInDate, reservation.checkOutDate)} malam</p>
                             <p><strong>Status:</strong> <span class="badge ${this.getStatusBadge(reservation.status)}">${Utils.escapeHtml(reservation.status)}</span></p>
+                            <p><strong>Status penitipan:</strong> ${Utils.escapeHtml(stay ? stay.status : 'Belum Check-In')}</p>
+                            ${stay ? `<p><strong>Kandang:</strong> ${Utils.escapeHtml(stay.kennel || 'Belum tercatat')}</p>` : ''}
                             <p><strong>Diajukan:</strong> ${Utils.formatDate(reservation.createdAt)}</p>
                         </div>
                     </div>

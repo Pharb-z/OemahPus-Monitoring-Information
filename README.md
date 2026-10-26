@@ -7,13 +7,22 @@ Aplikasi ini dibangun menggunakan **Vanilla HTML, CSS, dan JavaScript** murni ta
 ---
 
 ## 📌 Ruang Lingkup Layanan
-Aplikasi ini berfokus **khusus pada layanan penitipan kucing (Pet Hotel)**:
-- ✅ Manajemen Data Kucing & Pemilik
-- ✅ Pemeriksaan Awal Kondisi Fisik (*Intake physical check*: berat badan, suhu tubuh, parasit)
-- ✅ Reservasi Penitipan & Pemeriksaan Benturan Kapasitas Kandang
-- ✅ Pemantauan Penitipan & Laporan Harian (*Daily Report* makan, minum, pup, mood, foto)
-- ✅ Jadwal & Status Layanan Antar-Jemput (*Pet Pickup*)
-- ✅ Simulasi Status Pembayaran (*Belum Bayar, DP, Lunas*)
+Aplikasi ini berfokus **khusus pada layanan penitipan kucing (Pet Hotel)**.
+
+**Fitur yang sudah tersedia:**
+- ✅ Manajemen data kucing dan pemilik
+- ✅ Pemeriksaan awal kondisi fisik (*intake physical check*: berat badan, suhu tubuh, parasit)
+- ✅ Reservasi penitipan dan pemeriksaan benturan kapasitas kandang
+- ✅ Monitoring penitipan, check-in/check-out, dan riwayat penitipan
+- ✅ Laporan harian berbasis catatan teks: makan, minum, buang air kecil, buang air besar, aktivitas, dan mood. Laporan tidak mendukung foto.
+
+**Placeholder yang belum berfungsi:**
+- ⏳ Menu antar-jemput dan riwayat tugas driver belum menyediakan alur pengelolaan layanan yang berfungsi.
+- ⏳ Menu laporan/pembayaran dan status pembayaran pelanggan masih berupa tampilan placeholder; belum ada pengelolaan pembayaran.
+
+**Batasan dan rencana pengembangan:**
+- 💡 Pengelolaan antar-jemput dan pembayaran dapat dikembangkan pada tahap berikutnya.
+- 💡 Daftar master kandang dan pencocokan identitas kandang dengan daftar resmi belum tersedia.
 - ❌ *Tidak mencakup layanan grooming atau diagnosis medis dokter hewan*.
 
 ---
@@ -21,13 +30,13 @@ Aplikasi ini berfokus **khusus pada layanan penitipan kucing (Pet Hotel)**:
 ## 👥 Peran Pengguna (Role-Based Access)
 
 1. **Pemilik Pet Hotel (Owner)** — Dr. Hendra (`owner@oemahpus.com`)
-   - Memantau kapasitas kandang, omset/pendapatan simulasi, seluruh reservasi, dan armada antar-jemput.
+   - Memantau kapasitas kandang dan mengelola reservasi, monitoring penitipan, serta laporan harian. Menu antar-jemput dan pembayaran masih berupa placeholder.
 2. **Staf Operasional** — Siti Rahma (`ops@oemahpus.com`)
    - Mengelola check-in/out tamu, memeriksa data kondisi fisik awal, dan mengisi laporan harian (*Daily Report*).
 3. **Staf Antar-Jemput (Driver)** — Doni Pratama (`driver@oemahpus.com`)
-   - Mengelola daftar tugas penjemputan dan pengantaran kucing serta memperbarui status perjalanan.
+   - Memiliki menu jadwal antar-jemput dan riwayat tugas, tetapi alur tersebut masih berupa placeholder dan belum dapat digunakan untuk memperbarui tugas atau status perjalanan.
 4. **Pemilik Kucing (Customer)** — Budi Santoso (`budi@gmail.com`) / Registrasi Akun Baru
-   - Mengelola profil kucing milik sendiri, melihat masa menginap aktif, dan membaca laporan harian kucing miliknya.
+   - Mengelola profil kucing milik sendiri, membuat reservasi, melihat riwayat penitipan, dan membaca laporan harian kucing miliknya. Menu status pembayaran masih berupa placeholder.
 
 ---
 
@@ -47,7 +56,7 @@ Buka file `index.html` secara langsung dengan klik dua kali atau gunakan ekstens
 
 ---
 
-## 📂 Struktur File (Tahap 4 — Modul Reservasi)
+## 📂 Struktur File (Tahap 5 — Penitipan dan Laporan Harian)
 
 ```text
 Omi Pet Hotel/
@@ -63,13 +72,16 @@ Omi Pet Hotel/
 │   └── modules/
 │       ├── dashboard.js     # Perender dashboard spesifik per peran (Owner, Ops, Driver, Customer)
 │       ├── cats.js          # Modul B: Pengelolaan data kucing dan pemeriksaan awal
-│       └── reservations.js  # Modul C: Reservasi, status, detail, dan validasi kapasitas
+│       ├── reservations.js  # Modul C: Reservasi, status, detail, dan validasi kapasitas
+│       └── boarding.js     # Check-in/out, monitoring penitipan, dan laporan harian
 ├── assets/                  # Aset gambar dan ikon
 ├── PROJECT_SPEC.md          # Spesifikasi teknis dan aturan bisnis proyek
 └── OemahPus Monitoring Information.md # Dokumen SKPL / SRS asli
 ```
 
 Modul reservasi memakai kapasitas kandang yang sudah tersimpan pada konfigurasi hotel (`totalCapacity`). Periode dihitung mulai tanggal check-in sampai sebelum tanggal check-out; reservasi yang dibatalkan tidak mengurangi kapasitas.
+
+Check-in dan check-out disimpan sebagai riwayat penitipan tersendiri. Reservasi baru tetap berstatus konfirmasi; untuk data lama yang mencampur status dengan `Sedang Menginap`, migrasi membuat catatan penitipan, mengembalikan status reservasi ke `Dikonfirmasi`, dan menyimpan status lama sebagai metadata migrasi. Migrasi menggunakan jurnal pemulihan sebelum memperbarui beberapa data LocalStorage dan aplikasi tidak dibuka jika migrasi tertunda. Timestamp aktual yang tidak tersedia pada data lama dibiarkan kosong. Laporan memakai field yang sudah ada di data contoh: makan, minum, buang air kecil, buang air besar, serta aktivitas dan mood. Satu laporan per kucing per tanggal mengikuti indikator laporan harian yang sudah digunakan dashboard. Daftar master kandang belum tersedia, sehingga staf memasukkan identitas kandang saat check-in; format masukan divalidasi tetapi belum dicocokkan dengan daftar resmi.
 
 ---
 
