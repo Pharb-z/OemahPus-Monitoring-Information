@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="OMI - OemahPus Monitoring and Information: Sistem Informasi Pengelolaan Pet Hotel dan Penitipan Kucing">
+    <title>OMI — OemahPus Monitoring and Information</title>
+    <!-- CSS Sistem Desain dan Komponen -->
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/components.css">
+</head>
+<body>
+
+    <!-- =====================================================================
+         1. TAMPILAN AUTENTIKASI (LOGIN & REGISTRASI)
+         Ditampilkan jika pengguna belum memiliki sesi aktif di sessionStorage
+         ===================================================================== -->
+    <div id="auth-container" class="auth-page-container">
+        <div class="auth-card">
+            <!-- Header Kartu -->
+            <div class="auth-header">
+                <span class="logo-icon">🐾</span>
+                <h2>OMI Pet Hotel</h2>
+                <p>OemahPus Monitoring and Information • Surabaya</p>
+            </div>
+
+            <!-- Tab Switcher (Login vs Registrasi) -->
+            <div class="auth-tabs">
+                <button type="button" id="tab-btn-login" class="auth-tab-btn active">Masuk Akun</button>
+                <button type="button" id="tab-btn-register" class="auth-tab-btn">Daftar Pemilik Kucing</button>
+            </div>
+
+            <div class="auth-body">
+                <!-- VIEW TAB 1: LOGIN -->
+                <div id="auth-login-view">
+                    <!-- Quick Demo Login (Sangat Mudah untuk Pengujian & Presentasi Dosen) -->
+                    <div class="demo-login-box">
+                        <div class="demo-title">
+                            <span>⚡ Quick Demo Login (1-Klik Tanpa Password)</span>
+                        </div>
+                        <div class="demo-buttons-grid">
+                            <button type="button" class="btn-demo btn-demo-owner" data-role="owner">
+                                <span>👑 Dr. Hendra</span>
+                                <span class="role-tag">Owner Pet Hotel</span>
+                            </button>
+                            <button type="button" class="btn-demo btn-demo-ops" data-role="staff_ops">
+                                <span>📋 Siti Rahma</span>
+                                <span class="role-tag">Staf Operasional</span>
+                            </button>
+                            <button type="button" class="btn-demo btn-demo-driver" data-role="staff_driver">
+                                <span>🚗 Doni Pratama</span>
+                                <span class="role-tag">Staf Antar-Jemput</span>
+                            </button>
+                            <button type="button" class="btn-demo btn-demo-cust" data-role="customer">
+                                <span>🐱 Budi Santoso</span>
+                                <span class="role-tag">Pemilik Kucing (Cust)</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="divider">
+                        <span>atau login dengan email</span>
+                    </div>
+
+                    <!-- Form Login Standar -->
+                    <form id="form-login">
+                        <div class="form-group">
+                            <label for="login-email" class="form-label">Alamat Email <span class="required">*</span></label>
+                            <input type="email" id="login-email" class="form-control" placeholder="contoh: budi@gmail.com" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="login-password" class="form-label">Kata Sandi</label>
+                            <input type="password" id="login-password" class="form-control" placeholder="Masukkan kata sandi (opsional pada demo)">
+                            <small class="form-helper">Pada simulasi prototipe lokal, Anda cukup memasukkan email yang terdaftar.</small>
+                        </div>
+                        <button type="submit" class="btn btn-primary btn-block mt-3">
+                            Masuk ke Sistem OMI
+                        </button>
+                    </form>
+                </div>
+
+                <!-- VIEW TAB 2: REGISTRASI (KHUSUS PEMILIK KUCING) -->
+                <div id="auth-register-view" style="display: none;">
+                    <div class="mb-3">
+                        <span class="badge badge-success">Khusus Akun Pelanggan</span>
+                        <p class="subtitle mt-1">Daftarkan akun untuk menitipkan kucing kesayangan dan memantau laporan hariannya.</p>
+                    </div>
+
+                    <form id="form-register">
+                        <div class="form-group">
+                            <label for="reg-name" class="form-label">Nama Lengkap <span class="required">*</span></label>
+                            <input type="text" id="reg-name" class="form-control" placeholder="Contoh: Rina Melati" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="reg-email" class="form-label">Alamat Email <span class="required">*</span></label>
+                            <input type="email" id="reg-email" class="form-control" placeholder="Contoh: rina@gmail.com" required>
+                            <small class="form-helper">Email harus unik dan belum pernah didaftarkan.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="reg-phone" class="form-label">Nomor WhatsApp / Telepon <span class="required">*</span></label>
+                            <input type="tel" id="reg-phone" class="form-control" placeholder="Contoh: 08123456789" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="reg-address" class="form-label">Alamat Lengkap</label>
+                            <input type="text" id="reg-address" class="form-control" placeholder="Contoh: Jl. Dharmawangsa No. 20, Surabaya">
+                            <small class="form-helper">Diperlukan jika menggunakan fasilitas penjemputan/pengantaran kucing.</small>
+                        </div>
+
+                        <button type="submit" class="btn btn-primary btn-block mt-3">
+                            Daftar Sebagai Pemilik Kucing
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <!-- Catatan Keterbatasan Prototipe Akademik -->
+            <div class="academic-badge">
+                💡 <strong>Prototipe Akademik & Portofolio</strong><br>
+                Simulasi autentikasi frontend berbasis sessionStorage. Kata sandi riil tidak disimpan di browser.
+            </div>
+        </div>
+    </div>
+
+
+    <!-- =====================================================================
+         2. TAMPILAN APLIKASI UTAMA (DASHBOARD & MODUL)
+         Ditampilkan hanya jika pengguna telah berhasil login
+         ===================================================================== -->
+    <div id="app-wrapper" class="app-wrapper" style="display: none;">
+        <!-- Sidebar Navigasi -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="brand-logo">🐾</div>
+                <div class="brand-text">
+                    <h1>OMI Pet Hotel</h1>
+                    <p>Monitoring & Information</p>
+                </div>
+            </div>
+
+            <!-- Kontainer Menu Dinamis Sesuai Peran Aktif -->
+            <nav id="sidebar-menu-list" class="sidebar-nav"></nav>
+
+            <div class="sidebar-footer">
+                <p>OMI System v1.0 (MVP Phase 1)</p>
+                <p class="text-muted">OemahPus Surabaya</p>
+            </div>
+        </aside>
+
+        <!-- Area Konten & Header -->
+        <div class="main-wrapper">
+            <!-- Topbar Header -->
+            <header class="topbar">
+                <div class="topbar-left">
+                    <span class="badge badge-light">Layanan Penitipan Kucing (Pet Hotel)</span>
+                </div>
+                <div class="topbar-right user-profile-section">
+                    <div id="topbar-user-avatar" class="user-avatar-badge">DH</div>
+                    <div class="user-text-info">
+                        <span id="topbar-user-name" class="user-name">Dr. Hendra</span>
+                        <span id="topbar-user-role" class="user-role-badge badge-warning">Pemilik Pet Hotel</span>
+                    </div>
+                    <button type="button" id="btn-logout" class="btn btn-danger-outline" title="Keluar dari sesi">
+                        <span>Keluar</span> 🚪
+                    </button>
+                </div>
+            </header>
+
+            <!-- Kontainer Dinamis Konten Modul -->
+            <main id="main-content-container" class="content-area"></main>
+        </div>
+    </div>
+
+
+    <!-- Wadah Toast Notifikasi -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <!-- Script Logika Aplikasi (Urutan Modular Tanpa Dependensi) -->
+    <script src="js/utils.js"></script>
+    <script src="js/storage.js"></script>
+    <script src="js/auth.js"></script>
+    <script src="js/modules/dashboard.js"></script>
+    <script src="js/modules/cats.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
