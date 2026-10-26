@@ -386,11 +386,181 @@ const StorageService = {
     },
     getCats() { return this.get(StorageKeys.CATS); },
     getReservations() { return this.get(StorageKeys.RESERVATIONS); },
+    getReservationById(reservationId) {
+        return this.getReservations().find(reservation => reservation.id === reservationId) || null;
+    },
+    checkReservationAvailability(request = {}) {
+        const { catId, checkInDate, checkOutDate, reservationId = null } = request;
+        const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
+        if (!user || !['owner', 'staff_ops', 'customer'].includes(user.role)) {
+            return { available: false, message: 'Anda tidak memiliki izin memeriksa ketersediaan.' };
+        }
+
+        const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+        const isValidDate = value => {
+            if (typeof value !== 'string' || !datePattern.test(value)) return false;
+            const [year, month, day] = value.split('-').map(Number);
+            const date = new Date(Date.UTC(year, month - 1, day));
+            return date.getUTCFullYear() === year &&
+                date.getUTCMonth() === month - 1 &&
+                date.getUTCDate() === day;
+        };
+        if (!isValidDate(checkInDate) || !isValidDate(checkOutDate)) {
+            return { available: false, message: 'Tanggal check-in dan check-out harus valid.' };
+        }
+        if (checkOutDate <= checkInDate) {
+            return { available: false, message: 'Tanggal check-out harus setelah tanggal check-in.' };
+        }
+
+        const today = new Date();
+        const todayDate = [
+            today.getFullYear(),
+            String(today.getMonth() + 1).padStart(2, '0'),
+            String(today.getDate()).padStart(2, '0')
+        ].join('-');
+        if (checkInDate < todayDate) {
+            return { available: false, message: 'Tanggal check-in tidak boleh sebelum hari ini.' };
+        }
+
+        const cat = readStoredData(StorageKeys.CATS).find(item => item.id === catId);
+        if (!cat || (user.role === 'customer' && cat.ownerId !== user.id)) {
+            return { available: false, message: 'Kucing tidak ditemukan atau bukan milik Anda.' };
+        }
+
+        const settings = readStoredData(StorageKeys.SETTINGS);
+        const capacity = Number(settings && settings.totalCapacity);
+        if (!Number.isInteger(capacity) || capacity < 1) {
+            return { available: false, message: 'Kapasitas kandang belum dikonfigurasi dengan benar.' };
+        }
+
+        const reservations = readStoredData(StorageKeys.RESERVATIONS).filter(reservation =>
+            reservation.id !== reservationId && reservation.status !== 'Dibatalkan'
+        );
+        const sameCatConflict = reservations.find(reservation =>
+            reservation.catId === catId &&
+            reservation.checkInDate < checkOutDate &&
+            checkInDate < reservation.checkOutDate
+        );
+        if (sameCatConflict) {
+            return {
+                available: false,
+                message: `Kucing ini sudah memiliki reservasi pada periode tersebut (${sameCatConflict.id}).`
+            };
+        }
+
+        for (let day = checkInDate; day < checkOutDate; ) {
+            const occupied = reservations.filter(reservation =>
+                reservation.checkInDate <= day && day < reservation.checkOutDate
+            ).length;
+            if (occupied >= capacity) {
+                return {
+                    available: false,
+                    message: `Kapasitas kandang penuh pada ${day} (${occupied}/${capacity}).`
+                };
+            }
+            const [year, month, date] = day.split('-').map(Number);
+            const nextDay = new Date(Date.UTC(year, month - 1, date + 1));
+            day = [
+                nextDay.getUTCFullYear(),
+                String(nextDay.getUTCMonth() + 1).padStart(2, '0'),
+                String(nextDay.getUTCDate()).padStart(2, '0')
+            ].join('-');
+        }
+
+        return { available: true, message: 'Kapasitas tersedia.', capacity };
+    },
+    saveReservation(reservationData) {
+        if (!reservationData || typeof reservationData !== 'object') {
+            return { success: false, message: 'Data reservasi tidak valid.' };
+        }
+        const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
+        if (!user || !['owner', 'customer'].includes(user.role)) {
+            return { success: false, message: 'Anda tidak memiliki izin menyimpan reservasi.' };
+        }
+
+        const reservations = readStoredData(StorageKeys.RESERVATIONS);
+        const index = reservationData.id
+            ? reservations.findIndex(reservation => reservation.id === reservationData.id)
+            : -1;
+        const existingReservation = index >= 0 ? reservations[index] : null;
+        if (reservationData.id && !existingReservation) {
+            return { success: false, message: 'Reservasi tidak ditemukan.' };
+        }
+        if (user.role === 'customer' && existingReservation) {
+            return { success: false, message: 'Pemilik kucing hanya dapat membuat dan melihat reservasi.' };
+        }
+        if (existingReservation && user.role !== 'owner') {
+            return { success: false, message: 'Hanya Owner yang dapat mengedit reservasi.' };
+        }
+        if (existingReservation && !['Menunggu Konfirmasi', 'Dikonfirmasi'].includes(existingReservation.status)) {
+            return { success: false, message: 'Reservasi ini sudah tidak dapat diedit.' };
+        }
+        if (existingReservation && reservationData.catId !== existingReservation.catId) {
+            return { success: false, message: 'Kucing pada reservasi tidak dapat diganti.' };
+        }
+
+        const cat = readStoredData(StorageKeys.CATS).find(item => item.id === reservationData.catId);
+        if (!cat || (user.role === 'customer' && cat.ownerId !== user.id)) {
+            return { success: false, message: 'Pilih kucing milik akun Anda.' };
+        }
+
+        const availability = this.checkReservationAvailability({
+            catId: cat.id,
+            checkInDate: reservationData.checkInDate,
+            checkOutDate: reservationData.checkOutDate,
+            reservationId: existingReservation ? existingReservation.id : null
+        });
+        if (!availability.available) {
+            return { success: false, message: availability.message };
+        }
+
+        let reservationId = existingReservation && existingReservation.id;
+        if (!reservationId) {
+            const ids = new Set(reservations.map(reservation => reservation.id));
+            let attempts = 0;
+            do {
+                reservationId = attempts < 20
+                    ? Utils.generateId('RES')
+                    : `RES-${Date.now()}-${attempts}`;
+                attempts++;
+            } while (ids.has(reservationId));
+        }
+
+        const owner = readStoredData(StorageKeys.USERS).find(item => item.id === cat.ownerId);
+        const reservation = {
+            ...(existingReservation || {}),
+            id: reservationId,
+            catId: cat.id,
+            catName: cat.name,
+            ownerId: cat.ownerId,
+            ownerName: owner ? owner.name : cat.ownerName,
+            checkInDate: reservationData.checkInDate,
+            checkOutDate: reservationData.checkOutDate,
+            needPickup: existingReservation ? existingReservation.needPickup : false,
+            pickupType: existingReservation ? existingReservation.pickupType : 'none',
+            pickupAddress: existingReservation ? existingReservation.pickupAddress : '',
+            status: existingReservation ? existingReservation.status : 'Menunggu Konfirmasi',
+            createdAt: existingReservation ? existingReservation.createdAt : new Date().toISOString().split('T')[0]
+        };
+        if (existingReservation) reservations[index] = reservation;
+        else reservations.push(reservation);
+        if (!writeStoredData(StorageKeys.RESERVATIONS, reservations)) {
+            return { success: false, message: 'Gagal menyimpan reservasi. Periksa ruang penyimpanan browser.' };
+        }
+        return { success: true, reservation, isNew: !existingReservation };
+    },
     getDailyReports() { return this.get(StorageKeys.DAILY_REPORTS); },
     getPickups() { return this.get(StorageKeys.PICKUPS); },
     getSettings() {
         const settings = this.get(StorageKeys.SETTINGS);
         return settings && !Array.isArray(settings) ? settings : { totalCapacity: 10 };
+    },
+    getReservationCapacity() {
+        const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
+        if (!user || !['owner', 'staff_ops', 'customer'].includes(user.role)) return null;
+        const settings = readStoredData(StorageKeys.SETTINGS);
+        const capacity = Number(settings && settings.totalCapacity);
+        return Number.isInteger(capacity) && capacity > 0 ? capacity : null;
     },
 
     findUserByEmail(email) {
@@ -586,10 +756,13 @@ const StorageService = {
      */
     updateReservationStatus(reservationId, newStatus) {
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
-        if (!user || user.role !== 'owner' || newStatus !== 'Dikonfirmasi') return false;
+        if (!user || user.role !== 'owner' || !['Dikonfirmasi', 'Dibatalkan'].includes(newStatus)) return false;
         const reservations = readStoredData(StorageKeys.RESERVATIONS);
         const index = reservations.findIndex(r => r.id === reservationId);
-        if (index !== -1 && reservations[index].status === 'Menunggu Konfirmasi') {
+        const validTransition = index !== -1 &&
+            ((reservations[index].status === 'Menunggu Konfirmasi' && ['Dikonfirmasi', 'Dibatalkan'].includes(newStatus)) ||
+                (reservations[index].status === 'Dikonfirmasi' && newStatus === 'Dibatalkan'));
+        if (validTransition) {
             reservations[index].status = newStatus;
             return writeStoredData(StorageKeys.RESERVATIONS, reservations);
         }

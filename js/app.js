@@ -121,6 +121,7 @@ const App = {
             menuItems = [
                 { id: 'dashboard', label: 'Dashboard Operasional', icon: '📋', active: true },
                 { id: 'cats', label: 'Data Kucing & Cek Awal', icon: '🩺' },
+                { id: 'reservations', label: 'Daftar Reservasi', icon: '📅' },
                 { id: 'boarding', label: 'Check-In & Check-Out', icon: '🏨' },
                 { id: 'reports', label: 'Input Daily Report', icon: '📝' }
             ];
@@ -166,7 +167,7 @@ const App = {
     getAllowedModules(role) {
         const permissions = {
             owner: ['dashboard', 'cats', 'reservations', 'boarding', 'pickup', 'payments'],
-            staff_ops: ['dashboard', 'cats', 'boarding', 'reports'],
+            staff_ops: ['dashboard', 'cats', 'reservations', 'boarding', 'reports'],
             staff_driver: ['dashboard', 'pickup', 'history'],
             customer: ['dashboard', 'my-cats', 'new-reservation', 'my-reports', 'my-billing']
         };
@@ -199,6 +200,8 @@ const App = {
             DashboardModule.render(contentContainer, this.currentUser);
         } else if (moduleId === 'cats' || moduleId === 'my-cats') {
             CatsModule.render(contentContainer, this.currentUser);
+        } else if (moduleId === 'reservations' || moduleId === 'new-reservation') {
+            ReservationsModule.render(contentContainer, this.currentUser);
         } else {
             // Tampilan placeholder informatif untuk modul tahap selanjutnya
             contentContainer.innerHTML = `

@@ -47,11 +47,11 @@ Buka file `index.html` secara langsung dengan klik dua kali atau gunakan ekstens
 
 ---
 
-## 📂 Struktur File (Tahap 3 — Modul B: Pengelolaan Data Kucing & Pemeriksaan Awal)
+## 📂 Struktur File (Tahap 4 — Modul Reservasi)
 
 ```text
 Omi Pet Hotel/
-├── index.html               # Halaman utama aplikasi (Login, Register, Header, Sidebar, Dashboard, Data Kucing)
+├── index.html               # Halaman utama aplikasi (Login, Register, Header, Sidebar, Dashboard, modul)
 ├── css/
 │   ├── style.css            # Variabel desain sistem, tata letak grid/flexbox, sidebar tetap, topbar
 │   └── components.css       # Styling form auth, kartu dashboard, tabel data, modal form, kartu kucing
@@ -62,11 +62,14 @@ Omi Pet Hotel/
 │   ├── app.js               # Pengendali utama alur aplikasi, navigasi dinamis, dan event listener
 │   └── modules/
 │       ├── dashboard.js     # Perender dashboard spesifik per peran (Owner, Ops, Driver, Customer)
-│       └── cats.js          # Modul B: Pengelolaan data kucing, filter/pencarian, form intake fisik
+│       ├── cats.js          # Modul B: Pengelolaan data kucing dan pemeriksaan awal
+│       └── reservations.js  # Modul C: Reservasi, status, detail, dan validasi kapasitas
 ├── assets/                  # Aset gambar dan ikon
 ├── PROJECT_SPEC.md          # Spesifikasi teknis dan aturan bisnis proyek
 └── OemahPus Monitoring Information.md # Dokumen SKPL / SRS asli
 ```
+
+Modul reservasi memakai kapasitas kandang yang sudah tersimpan pada konfigurasi hotel (`totalCapacity`). Periode dihitung mulai tanggal check-in sampai sebelum tanggal check-out; reservasi yang dibatalkan tidak mengurangi kapasitas.
 
 ---
 
