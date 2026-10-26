@@ -25,6 +25,15 @@ const ReservationsModule = {
         const canManage = activeUser.role === 'owner';
         const canCreate = canManage || activeUser.role === 'customer';
         const capacity = StorageService.getReservationCapacity();
+        const billingOverview = canManage ? StorageService.getBillingOverview() : null;
+        if (billingOverview && !billingOverview.success) {
+            Utils.showToast(billingOverview.message, 'error');
+        }
+        const billedReservationIds = new Set(
+            billingOverview && billingOverview.success
+                ? billingOverview.bills.map(bill => bill.reservationId)
+                : []
+        );
 
         containerElement.innerHTML = `
             <div class="dashboard-header mb-4">
@@ -94,13 +103,13 @@ const ReservationsModule = {
                                         <td>
                                             <div style="display: flex; flex-wrap: wrap; gap: 0.4rem;">
                                                 <button type="button" class="btn btn-outline btn-sm btn-reservation-detail" data-id="${Utils.escapeHtml(reservation.id)}">Detail</button>
-                                                ${canManage && !stay && ['Menunggu Konfirmasi', 'Dikonfirmasi'].includes(reservation.status) ? `
+                                                ${canManage && billingOverview.success && !stay && !billedReservationIds.has(reservation.id) && ['Menunggu Konfirmasi', 'Dikonfirmasi'].includes(reservation.status) ? `
                                                     <button type="button" class="btn btn-outline btn-sm btn-reservation-edit" data-id="${Utils.escapeHtml(reservation.id)}">Edit</button>
                                                 ` : ''}
                                                 ${canManage && reservation.status === 'Menunggu Konfirmasi' ? `
                                                     <button type="button" class="btn btn-primary btn-sm btn-reservation-confirm" data-id="${Utils.escapeHtml(reservation.id)}">Konfirmasi</button>
                                                 ` : ''}
-                                                ${canManage && !stay && ['Menunggu Konfirmasi', 'Dikonfirmasi'].includes(reservation.status) ? `
+                                                ${canManage && !stay && !billedReservationIds.has(reservation.id) && ['Menunggu Konfirmasi', 'Dikonfirmasi'].includes(reservation.status) ? `
                                                     <button type="button" class="btn btn-danger-outline btn-sm btn-reservation-cancel" data-id="${Utils.escapeHtml(reservation.id)}">Batalkan</button>
                                                 ` : ''}
                                             </div>
@@ -166,9 +175,14 @@ const ReservationsModule = {
 
     openForm(reservation = null) {
         const user = AuthService.getCurrentUser();
+        const billingOverview = reservation && user && user.role === 'owner'
+            ? StorageService.getBillingOverview()
+            : null;
         if (!user || !['owner', 'customer'].includes(user.role) ||
             (reservation && user.role !== 'owner') ||
-            (reservation && StorageService.getBoardingStayByReservationId(reservation.id))) {
+            (reservation && StorageService.getBoardingStayByReservationId(reservation.id)) ||
+            (reservation && (!billingOverview.success ||
+                billingOverview.bills.some(bill => bill.reservationId === reservation.id)))) {
             Utils.showToast('Anda tidak memiliki izin membuat atau mengedit reservasi.', 'error');
             return;
         }

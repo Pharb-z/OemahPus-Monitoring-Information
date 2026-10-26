@@ -53,30 +53,32 @@ const DashboardModule = {
         const reservations = StorageService.getReservations();
         const pickups = StorageService.getPickups();
         const activities = StorageService.getRecentActivities();
+        const billingOverview = StorageService.getBillingOverview();
+        if (!billingOverview.success) Utils.showToast(billingOverview.message, 'error');
+        const billingByReservationId = new Map(
+            (billingOverview.success ? billingOverview.bills : [])
+                .map(bill => [bill.reservationId, bill])
+        );
 
         // 1. Perhitungan Statistik Dinamis
         const activeStays = StorageService.getActiveBoardingStays().map(stay => {
             const reservation = reservations.find(item => item.id === stay.reservationId) || {};
+            const bill = billingByReservationId.get(stay.reservationId);
             return {
                 ...stay,
                 roomNumber: stay.kennel,
                 checkOutDate: stay.plannedCheckOutDate,
                 needPickup: reservation.needPickup,
-                paymentStatus: reservation.paymentStatus || 'Belum dicatat'
+                paymentStatus: bill ? bill.paymentStatus : 'Belum Ditagihkan'
             };
         });
         const pendingConfirm = reservations.filter(r => r.status === 'Menunggu Konfirmasi');
         const totalCapacity = Number(settings.totalCapacity) || 10;
         const availableRooms = Math.max(0, totalCapacity - activeStays.length);
         const occupancyPercentage = Math.min(100, Math.round((activeStays.length / totalCapacity) * 100));
-
-        // 2. Simulasi Pendapatan Total (dari reservasi yang tidak dibatalkan)
-        const totalRevenue = reservations.reduce((acc, curr) => {
-            if (curr.status !== 'Dibatalkan') {
-                return acc + (Number(curr.estimatedCost) || 0) + (Number(curr.pickupCost) || 0);
-            }
-            return acc;
-        }, 0);
+        const totalPaymentsRecorded = billingOverview.success
+            ? billingOverview.transactions.reduce((sum, transaction) => sum + transaction.amount, 0)
+            : 0;
 
         const activePickups = pickups.filter(p => p.status !== 'Selesai');
 
@@ -119,9 +121,9 @@ const DashboardModule = {
                 <div class="stat-card">
                     <div class="stat-icon bg-blue-light text-blue">💰</div>
                     <div class="stat-info">
-                        <span class="stat-label">Simulasi Pendapatan</span>
-                        <div class="stat-value">${Utils.formatRupiah(totalRevenue)}</div>
-                        <span class="stat-desc text-muted">Estimasi omset tercatat di sistem</span>
+                        <span class="stat-label">Pembayaran Tercatat</span>
+                        <div class="stat-value">${Utils.formatRupiah(totalPaymentsRecorded)}</div>
+                        <span class="stat-desc text-muted">Dana yang dicatat manual sebagai diterima</span>
                     </div>
                 </div>
 
@@ -554,6 +556,12 @@ const DashboardModule = {
         const allReservations = StorageService.getReservations();
         const allReports = StorageService.getDailyReports();
         const allPickups = StorageService.getPickups();
+        const billingOverview = StorageService.getBillingOverview();
+        if (!billingOverview.success) Utils.showToast(billingOverview.message, 'error');
+        const billingByReservationId = new Map(
+            (billingOverview.success ? billingOverview.bills : [])
+                .map(bill => [bill.reservationId, bill])
+        );
 
         // FILTER KETAT KHUSUS DATA CUSTOMER YANG LOGIN (Single Source of Truth)
         const myCats = allCats.filter(c => c.ownerId === user.id);
@@ -567,22 +575,21 @@ const DashboardModule = {
         const activeReservation = activeStayRecord
             ? myReservations.find(reservation => reservation.id === activeStayRecord.reservationId)
             : null;
+        const activeStayBill = activeStayRecord
+            ? billingByReservationId.get(activeStayRecord.reservationId)
+            : null;
         const activeStay = activeStayRecord ? {
             ...activeStayRecord,
             roomNumber: activeStayRecord.kennel,
             checkInDate: activeStayRecord.checkInDate,
             checkOutDate: activeStayRecord.plannedCheckOutDate,
             needPickup: activeReservation && activeReservation.needPickup,
-            paymentStatus: activeReservation ? activeReservation.paymentStatus : 'Belum dicatat'
+            paymentStatus: activeStayBill ? activeStayBill.paymentStatus : 'Belum Ditagihkan'
         } : null;
 
-        // Total akumulasi tagihan simulasi
-        const totalEstimatedBill = myReservations.reduce((acc, curr) => {
-            if (curr.status !== 'Dibatalkan') {
-                return acc + (Number(curr.estimatedCost) || 0) + (Number(curr.pickupCost) || 0);
-            }
-            return acc;
-        }, 0);
+        const totalBilledAmount = billingOverview.success
+            ? billingOverview.bills.reduce((sum, bill) => sum + bill.totalAmount, 0)
+            : 0;
 
         return `
             <div class="dashboard-header mb-4">
@@ -629,9 +636,9 @@ const DashboardModule = {
                 <div class="stat-card">
                     <div class="stat-icon bg-purple-light text-purple">💳</div>
                     <div class="stat-info">
-                        <span class="stat-label">Simulasi Tagihan</span>
-                        <div class="stat-value">${Utils.formatRupiah(totalEstimatedBill)}</div>
-                        <span class="stat-desc text-muted">Estimasi biaya penitipan</span>
+                        <span class="stat-label">Total Tagihan</span>
+                        <div class="stat-value">${Utils.formatRupiah(totalBilledAmount)}</div>
+                        <span class="stat-desc text-muted">Tagihan yang sudah diterbitkan untuk reservasi Anda</span>
                     </div>
                 </div>
             </div>
@@ -717,7 +724,7 @@ const DashboardModule = {
                                 <th>Kucing</th>
                                 <th>Jadwal Masuk - Keluar</th>
                                 <th>Layanan Antar-Jemput</th>
-                                <th>Estimasi Biaya</th>
+                                <th>Total Tagihan</th>
                                 <th>Status Reservasi</th>
                             </tr>
                         </thead>
@@ -728,7 +735,9 @@ const DashboardModule = {
                                     <td><strong>🐱 ${Utils.escapeHtml(r.catName)}</strong></td>
                                     <td>${Utils.formatDate(r.checkInDate)} s/d ${Utils.formatDate(r.checkOutDate)}</td>
                                     <td>${r.needPickup ? '<span class="badge badge-primary">Antar-Jemput</span>' : '<span class="badge badge-light">Mandiri</span>'}</td>
-                                    <td>${Utils.formatRupiah((r.estimatedCost || 0) + (r.pickupCost || 0))}</td>
+                                    <td>${billingByReservationId.has(r.id)
+                                        ? Utils.formatRupiah(billingByReservationId.get(r.id).totalAmount)
+                                        : '<span class="text-muted">Belum ditagihkan</span>'}</td>
                                     <td>
                                         <span class="badge ${r.status === 'Sedang Menginap' ? 'badge-success' : (r.status === 'Dikonfirmasi' ? 'badge-info' : 'badge-warning')}">
                                             ${Utils.escapeHtml(r.status)}

@@ -10,6 +10,8 @@ const StorageKeys = {
     RESERVATIONS: 'omi_reservations_data',
     BOARDING_STAYS: 'omi_boarding_stays_data',
     DAILY_REPORTS: 'omi_daily_reports_data',
+    BILLING_BILLS: 'omi_billing_bills_data',
+    BILLING_TRANSACTIONS: 'omi_billing_transactions_data',
     PICKUPS: 'omi_pickups_data',
     SETTINGS: 'omi_hotel_settings'
 };
@@ -25,11 +27,28 @@ const readStoredData = (key) => {
     try {
         const data = localStorage.getItem(key);
         return data ? JSON.parse(data) : [];
-    } catch (e) {
-        console.error(`Gagal membaca ${key} dari LocalStorage:`, e);
+    } catch (error) {
+        console.error(`Gagal membaca ${key} dari LocalStorage:`, error);
         return [];
     }
 };
+
+const readStoredCollection = (key) => {
+    try {
+        const data = localStorage.getItem(key);
+        if (data === null) return { success: true, value: [] };
+        const value = JSON.parse(data);
+        if (!Array.isArray(value)) {
+            return { success: false, message: `Data ${key} bukan daftar yang valid.` };
+        }
+        return { success: true, value };
+    } catch (error) {
+        console.error(`Gagal membaca ${key} dari LocalStorage:`, error);
+        return { success: false, message: `Data ${key} tidak dapat dibaca.` };
+    }
+};
+
+const isStoredRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
 const writeStoredData = (key, value) => {
     try {
@@ -38,6 +57,21 @@ const writeStoredData = (key, value) => {
     } catch (e) {
         console.error(`Gagal menyimpan ${key} ke LocalStorage:`, e);
         return false;
+    }
+};
+
+const readBillingCollection = key => {
+    try {
+        const raw = localStorage.getItem(key);
+        if (raw === null) return { success: true, value: [] };
+        const value = JSON.parse(raw);
+        if (!Array.isArray(value)) {
+            return { success: false, message: `Data ${key} bukan daftar yang valid.` };
+        }
+        return { success: true, value };
+    } catch (error) {
+        console.error(`Gagal membaca ${key} dari LocalStorage:`, error);
+        return { success: false, message: `Data ${key} tidak dapat dibaca.` };
     }
 };
 
@@ -575,6 +609,22 @@ const StorageService = {
             const catIds = this.getCats().map(cat => cat.id);
             return data.filter(item => catIds.includes(item.catId));
         }
+        if (key === StorageKeys.BILLING_BILLS) {
+            if (['owner', 'staff_ops'].includes(user.role)) return data;
+            if (user.role !== 'customer') return [];
+            const reservationOwners = new Map(
+                readStoredData(StorageKeys.RESERVATIONS).map(item => [item.id, item.ownerId])
+            );
+            return data.filter(item =>
+                item.customerId === user.id && reservationOwners.get(item.reservationId) === user.id
+            );
+        }
+        if (key === StorageKeys.BILLING_TRANSACTIONS) {
+            if (['owner', 'staff_ops'].includes(user.role)) return data;
+            if (user.role !== 'customer') return [];
+            const billIds = new Set(this.get(StorageKeys.BILLING_BILLS).map(item => item.id));
+            return data.filter(item => item.customerId === user.id && billIds.has(item.billId));
+        }
         if (key === StorageKeys.PICKUPS) {
             if (['owner', 'staff_ops'].includes(user.role)) return data;
             if (user.role === 'staff_driver') {
@@ -625,6 +675,367 @@ const StorageService = {
     getDailyReports() { return this.get(StorageKeys.DAILY_REPORTS); },
     getDailyReportById(reportId) {
         return this.getDailyReports().find(report => report.id === reportId) || null;
+    },
+    getBillingOverview() {
+        const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
+        if (!user || !['owner', 'staff_ops', 'customer'].includes(user.role)) {
+            return { success: false, message: 'Anda tidak memiliki izin melihat tagihan.' };
+        }
+
+        const billsResult = readBillingCollection(StorageKeys.BILLING_BILLS);
+        const transactionsResult = readBillingCollection(StorageKeys.BILLING_TRANSACTIONS);
+        if (!billsResult.success || !transactionsResult.success) {
+            return {
+                success: false,
+                message: 'Data tagihan atau pembayaran tidak dapat dibaca. Data lokal dipertahankan.'
+            };
+        }
+
+        const reservationsResult = readBillingCollection(StorageKeys.RESERVATIONS);
+        const customersResult = readBillingCollection(StorageKeys.USERS);
+        if (!reservationsResult.success || !customersResult.success) {
+            return {
+                success: false,
+                message: 'Data reservasi atau pelanggan tidak valid; tagihan tidak dapat ditampilkan.'
+            };
+        }
+        const reservations = reservationsResult.value;
+        const customers = customersResult.value;
+        const validReservations = reservations.every(item =>
+            isStoredRecord(item) &&
+            typeof item.id === 'string' && item.id &&
+            typeof item.catId === 'string' && item.catId &&
+            typeof item.ownerId === 'string' && item.ownerId &&
+            typeof item.status === 'string' &&
+            typeof item.checkInDate === 'string' &&
+            typeof item.checkOutDate === 'string'
+        );
+        const validCustomers = customers.every(item =>
+            isStoredRecord(item) &&
+            typeof item.id === 'string' && item.id &&
+            typeof item.role === 'string'
+        );
+        if (!validReservations || !validCustomers) {
+            return {
+                success: false,
+                message: 'Struktur data reservasi atau pelanggan tidak valid; tagihan tidak dapat ditampilkan.'
+            };
+        }
+        const reservationById = new Map();
+        for (const reservation of reservations) {
+            if (reservationById.has(reservation.id)) {
+                return { success: false, message: 'Ditemukan ID reservasi duplikat; tagihan tidak dapat ditampilkan.' };
+            }
+            reservationById.set(reservation.id, reservation);
+        }
+        const billsById = new Map();
+        const seenReservationIds = new Set();
+        for (const bill of billsResult.value) {
+            const reservation = bill && reservationById.get(bill.reservationId);
+            const periodStartValid = bill && this.isValidIsoDate(bill.periodStart);
+            const periodEndValid = bill && this.isValidIsoDate(bill.periodEndExclusive);
+            const calculatedNights = periodStartValid && periodEndValid
+                ? (Date.parse(`${bill.periodEndExclusive}T00:00:00Z`) -
+                    Date.parse(`${bill.periodStart}T00:00:00Z`)) / 86400000
+                : NaN;
+            const validBill = bill && typeof bill.id === 'string' && bill.id &&
+                typeof bill.reservationId === 'string' && bill.reservationId &&
+                typeof bill.customerId === 'string' && bill.customerId &&
+                typeof bill.catId === 'string' && bill.catId &&
+                Number.isSafeInteger(bill.numberOfNights) && bill.numberOfNights > 0 &&
+                periodStartValid && periodEndValid &&
+                bill.periodEndExclusive > bill.periodStart &&
+                Number.isSafeInteger(calculatedNights) &&
+                bill.numberOfNights === calculatedNights &&
+                Number.isSafeInteger(bill.unitRate) && bill.unitRate > 0 &&
+                Number.isSafeInteger(bill.totalAmount) && bill.totalAmount > 0 &&
+                bill.numberOfNights * bill.unitRate === bill.totalAmount &&
+                bill.currency === 'IDR' && typeof bill.createdAt === 'string' &&
+                bill.createdBy && typeof bill.createdBy.id === 'string' &&
+                bill.periodStart === (reservation && reservation.checkInDate) &&
+                bill.periodEndExclusive === (reservation && reservation.checkOutDate) &&
+                bill.catId === (reservation && reservation.catId) &&
+                reservation && reservation.status !== 'Dibatalkan' &&
+                reservation && reservation.ownerId === bill.customerId &&
+                !billsById.has(bill.id) && !seenReservationIds.has(bill.reservationId);
+            if (!validBill) {
+                return { success: false, message: 'Ditemukan data tagihan yang tidak konsisten. Hubungi Owner sebelum mencatat pembayaran.' };
+            }
+            const customer = customers.find(item =>
+                item.id === bill.customerId && item.role === 'customer'
+            );
+            if (!customer) {
+                return { success: false, message: 'Pemilik tagihan tidak valid. Data pembayaran tidak dapat ditampilkan.' };
+            }
+            billsById.set(bill.id, bill);
+            seenReservationIds.add(bill.reservationId);
+        }
+
+        const transactionsByBillId = new Map();
+        const seenTransactionIds = new Set();
+        const seenRequestIds = new Set();
+        for (const transaction of transactionsResult.value) {
+            const bill = transaction && billsById.get(transaction.billId);
+            const validTransaction = transaction && typeof transaction.id === 'string' && transaction.id &&
+                typeof transaction.idempotencyKey === 'string' && transaction.idempotencyKey &&
+                !seenTransactionIds.has(transaction.id) && !seenRequestIds.has(transaction.idempotencyKey) &&
+                Number.isSafeInteger(transaction.amount) && transaction.amount > 0 &&
+                ['cash', 'transfer'].includes(transaction.method) &&
+                transaction.status === 'Diterima' && typeof transaction.recordedAt === 'string' &&
+                transaction.recordedBy && typeof transaction.recordedBy.id === 'string' &&
+                typeof transaction.recordedBy.name === 'string' && bill &&
+                transaction.reservationId === bill.reservationId &&
+                transaction.customerId === bill.customerId;
+            if (!validTransaction) {
+                return { success: false, message: 'Ditemukan data transaksi yang tidak konsisten. Hubungi Owner sebelum melanjutkan.' };
+            }
+            seenTransactionIds.add(transaction.id);
+            seenRequestIds.add(transaction.idempotencyKey);
+            const list = transactionsByBillId.get(bill.id) || [];
+            list.push(transaction);
+            transactionsByBillId.set(bill.id, list);
+        }
+
+        const visibleBills = billsResult.value.filter(bill =>
+            user.role !== 'customer' || (
+                bill.customerId === user.id &&
+                reservationById.get(bill.reservationId).ownerId === user.id
+            )
+        );
+        const visibleBillIds = new Set(visibleBills.map(bill => bill.id));
+        const visibleTransactions = transactionsResult.value.filter(transaction =>
+            visibleBillIds.has(transaction.billId)
+        );
+        const summaries = visibleBills.map(bill => {
+            const billTransactions = transactionsByBillId.get(bill.id) || [];
+            const totalPaid = billTransactions.reduce((sum, item) => sum + item.amount, 0);
+            if (!Number.isSafeInteger(totalPaid) || totalPaid > bill.totalAmount) return null;
+            return {
+                ...bill,
+                totalPaid,
+                remainingAmount: bill.totalAmount - totalPaid,
+                paymentStatus: totalPaid === 0
+                    ? 'Belum Dibayar'
+                    : totalPaid === bill.totalAmount
+                        ? 'Lunas'
+                        : 'Sebagian Dibayar',
+                transactions: billTransactions.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))
+            };
+        });
+        if (summaries.some(item => !item)) {
+            return { success: false, message: 'Total transaksi melebihi nilai tagihan. Data dipertahankan dan pembayaran dihentikan.' };
+        }
+        return {
+            success: true,
+            bills: summaries.sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+            transactions: visibleTransactions.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))
+        };
+    },
+    createBillingBill(reservationId) {
+        const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
+        if (!user || user.role !== 'staff_ops') {
+            return { success: false, message: 'Hanya Staf Operasional yang dapat menyiapkan tagihan.' };
+        }
+
+        const overview = this.getBillingOverview();
+        if (!overview.success) return overview;
+        if (overview.bills.some(bill => bill.reservationId === reservationId)) {
+            return { success: false, message: 'Tagihan untuk reservasi ini sudah tersedia.' };
+        }
+
+        const reservationsResult = readBillingCollection(StorageKeys.RESERVATIONS);
+        const staysResult = readBillingCollection(StorageKeys.BOARDING_STAYS);
+        if (!reservationsResult.success || !staysResult.success) {
+            return { success: false, message: 'Data reservasi atau penitipan tidak valid; tagihan tidak dibuat.' };
+        }
+        const validReservations = reservationsResult.value.every(item =>
+            isStoredRecord(item) &&
+            typeof item.id === 'string' && item.id &&
+            typeof item.catId === 'string' && item.catId &&
+            typeof item.ownerId === 'string' && item.ownerId &&
+            typeof item.status === 'string' &&
+            typeof item.checkInDate === 'string' &&
+            typeof item.checkOutDate === 'string'
+        );
+        const validStays = staysResult.value.every(item =>
+            isStoredRecord(item) &&
+            typeof item.reservationId === 'string' && item.reservationId &&
+            typeof item.catId === 'string' && item.catId &&
+            typeof item.ownerId === 'string' && item.ownerId &&
+            typeof item.id === 'string' && item.id &&
+            typeof item.status === 'string'
+        );
+        if (!validReservations || !validStays) {
+            return { success: false, message: 'Struktur data reservasi atau penitipan tidak valid; tagihan tidak dibuat.' };
+        }
+        const reservation = reservationsResult.value.find(item => item.id === reservationId);
+        const stay = staysResult.value.find(item => item.reservationId === reservationId);
+        if (!reservation || reservation.status === 'Dibatalkan' ||
+            (reservation.status !== 'Dikonfirmasi' && !stay)) {
+            return { success: false, message: 'Tagihan hanya dapat dibuat untuk reservasi terkonfirmasi atau yang memiliki riwayat penitipan.' };
+        }
+        if (stay && (stay.catId !== reservation.catId || stay.ownerId !== reservation.ownerId)) {
+            return { success: false, message: 'Relasi reservasi dan penitipan tidak konsisten.' };
+        }
+        if (!this.isValidIsoDate(reservation.checkInDate) ||
+            !this.isValidIsoDate(reservation.checkOutDate) ||
+            reservation.checkOutDate <= reservation.checkInDate) {
+            return { success: false, message: 'Tanggal reservasi tidak valid untuk perhitungan tagihan.' };
+        }
+
+        const catsResult = readBillingCollection(StorageKeys.CATS);
+        const customersResult = readBillingCollection(StorageKeys.USERS);
+        if (!catsResult.success || !customersResult.success) {
+            return { success: false, message: 'Data kucing atau pelanggan tidak valid; tagihan tidak dibuat.' };
+        }
+        const validCats = catsResult.value.every(item =>
+            isStoredRecord(item) &&
+            typeof item.id === 'string' && item.id &&
+            typeof item.ownerId === 'string' && item.ownerId
+        );
+        const validCustomers = customersResult.value.every(item =>
+            isStoredRecord(item) &&
+            typeof item.id === 'string' && item.id &&
+            typeof item.role === 'string'
+        );
+        if (!validCats || !validCustomers) {
+            return { success: false, message: 'Struktur data kucing atau pelanggan tidak valid; tagihan tidak dibuat.' };
+        }
+        const cats = catsResult.value;
+        const customers = customersResult.value;
+        const cat = cats.find(item =>
+            item.id === reservation.catId && item.ownerId === reservation.ownerId
+        );
+        const customer = customers.find(item =>
+            item.id === reservation.ownerId && item.role === 'customer'
+        );
+        if (!cat || !customer) {
+            return { success: false, message: 'Data kucing atau pelanggan pada reservasi tidak valid.' };
+        }
+        let settings;
+        try {
+            const rawSettings = localStorage.getItem(StorageKeys.SETTINGS);
+            settings = rawSettings === null ? null : JSON.parse(rawSettings);
+        } catch (error) {
+            console.error('Konfigurasi tarif tidak dapat dibaca:', error);
+            return { success: false, message: 'Konfigurasi tarif tidak dapat dibaca.' };
+        }
+        if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+            return { success: false, message: 'Konfigurasi tarif hotel tidak valid.' };
+        }
+        const unitRate = Number(settings && settings.standardDailyRate);
+        if (!Number.isSafeInteger(unitRate) || unitRate <= 0) {
+            return { success: false, message: 'Tarif harian hotel belum dikonfigurasi sebagai nominal Rupiah bulat yang valid.' };
+        }
+        const start = new Date(`${reservation.checkInDate}T00:00:00Z`);
+        const end = new Date(`${reservation.checkOutDate}T00:00:00Z`);
+        const numberOfNights = (end.getTime() - start.getTime()) / 86400000;
+        const totalAmount = numberOfNights * unitRate;
+        if (!Number.isSafeInteger(numberOfNights) || numberOfNights <= 0 ||
+            !Number.isSafeInteger(totalAmount) || totalAmount <= 0) {
+            return { success: false, message: 'Periode atau total tagihan tidak dapat dihitung dengan aman.' };
+        }
+
+        const billsResult = readBillingCollection(StorageKeys.BILLING_BILLS);
+        if (!billsResult.success) return { success: false, message: 'Data tagihan tidak dapat dibaca.' };
+        if (billsResult.value.some(bill => bill.reservationId === reservationId)) {
+            return { success: false, message: 'Tagihan untuk reservasi ini sudah tersedia.' };
+        }
+        const bill = {
+            id: this.generateUniqueRecordId('BILL', billsResult.value),
+            reservationId: reservation.id,
+            customerId: customer.id,
+            customerName: customer.name,
+            catId: cat.id,
+            catName: cat.name,
+            boardingStayId: stay ? stay.id : null,
+            currency: 'IDR',
+            periodStart: reservation.checkInDate,
+            periodEndExclusive: reservation.checkOutDate,
+            numberOfNights,
+            unitRate,
+            lineItems: [{
+                description: `Penitipan kucing (${numberOfNights} malam)`,
+                quantity: numberOfNights,
+                unitRate,
+                amount: totalAmount
+            }],
+            totalAmount,
+            createdAt: new Date().toISOString(),
+            createdBy: { id: user.id, name: user.name }
+        };
+        billsResult.value.push(bill);
+        if (!writeStoredData(StorageKeys.BILLING_BILLS, billsResult.value)) {
+            return { success: false, message: 'Tagihan gagal disimpan. Periksa ruang penyimpanan browser.' };
+        }
+        return { success: true, bill };
+    },
+    recordManualPayment(paymentData = {}) {
+        const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
+        if (!user || user.role !== 'staff_ops') {
+            return { success: false, message: 'Hanya Staf Operasional yang dapat mencatat pembayaran.' };
+        }
+        if (!paymentData || typeof paymentData !== 'object') {
+            return { success: false, message: 'Data pembayaran tidak valid.' };
+        }
+        const idempotencyKey = typeof paymentData.idempotencyKey === 'string'
+            ? paymentData.idempotencyKey.trim()
+            : '';
+        if (!idempotencyKey || idempotencyKey.length > 120) {
+            return { success: false, message: 'Identitas pengiriman pembayaran tidak valid.' };
+        }
+        const amountValue = paymentData.amount;
+        const amountString = typeof amountValue === 'string' ? amountValue.trim() : '';
+        const amount = typeof amountValue === 'number'
+            ? amountValue
+            : (/^\d+$/.test(amountString) ? Number(amountString) : NaN);
+        if (!Number.isSafeInteger(amount) || amount <= 0) {
+            return { success: false, message: 'Nominal pembayaran harus berupa bilangan bulat Rupiah yang lebih besar dari nol.' };
+        }
+        if (!['cash', 'transfer'].includes(paymentData.method)) {
+            return { success: false, message: 'Pilih metode tunai atau transfer.' };
+        }
+        const reference = typeof paymentData.reference === 'string' ? paymentData.reference.trim() : '';
+        if (reference.length > 120) {
+            return { success: false, message: 'Catatan atau referensi pembayaran maksimal 120 karakter.' };
+        }
+
+        const overview = this.getBillingOverview();
+        if (!overview.success) return overview;
+        if (overview.transactions.some(item => item.idempotencyKey === idempotencyKey)) {
+            return { success: false, message: 'Pengiriman ini sudah pernah dicatat.' };
+        }
+        const bill = overview.bills.find(item => item.id === paymentData.billId);
+        if (!bill) return { success: false, message: 'Tagihan tidak ditemukan atau tidak valid.' };
+        if (amount > bill.remainingAmount) {
+            return { success: false, message: 'Nominal pembayaran melebihi sisa tagihan.' };
+        }
+
+        const transactionsResult = readBillingCollection(StorageKeys.BILLING_TRANSACTIONS);
+        if (!transactionsResult.success) {
+            return { success: false, message: 'Data transaksi tidak dapat dibaca.' };
+        }
+        if (transactionsResult.value.some(item => item.idempotencyKey === idempotencyKey)) {
+            return { success: false, message: 'Pengiriman ini sudah pernah dicatat.' };
+        }
+        const transaction = {
+            id: this.generateUniqueRecordId('PAY', transactionsResult.value),
+            billId: bill.id,
+            reservationId: bill.reservationId,
+            customerId: bill.customerId,
+            amount,
+            method: paymentData.method,
+            status: 'Diterima',
+            recordedAt: new Date().toISOString(),
+            recordedBy: { id: user.id, name: user.name },
+            reference,
+            idempotencyKey
+        };
+        transactionsResult.value.push(transaction);
+        if (!writeStoredData(StorageKeys.BILLING_TRANSACTIONS, transactionsResult.value)) {
+            return { success: false, message: 'Pembayaran gagal disimpan. Tidak ada status lunas yang diperbarui.' };
+        }
+        return { success: true, transaction };
     },
     isValidIsoDate(value) {
         if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -697,12 +1108,19 @@ const StorageService = {
         }
         const { reservationId, kennel } = request;
 
-        const reservation = readStoredData(StorageKeys.RESERVATIONS)
-            .find(item => item.id === reservationId);
+        const reservationsResult = readStoredCollection(StorageKeys.RESERVATIONS);
+        const catsResult = readStoredCollection(StorageKeys.CATS);
+        const staysResult = readStoredCollection(StorageKeys.BOARDING_STAYS);
+        if (!reservationsResult.success || !catsResult.success || !staysResult.success ||
+            ![reservationsResult, catsResult, staysResult]
+                .every(result => result.value.every(isStoredRecord))) {
+            return { success: false, message: 'Data reservasi, kucing, atau penitipan tidak dapat dibaca; check-in tidak disimpan.' };
+        }
+        const reservation = reservationsResult.value.find(item => item.id === reservationId);
         if (!reservation || reservation.status !== 'Dikonfirmasi') {
             return { success: false, message: 'Check-in hanya dapat dilakukan untuk reservasi yang telah dikonfirmasi.' };
         }
-        if (this.getBoardingStayByReservationId(reservation.id)) {
+        if (staysResult.value.some(stay => stay.reservationId === reservation.id)) {
             return { success: false, message: 'Reservasi ini sudah memiliki riwayat penitipan dan tidak dapat check-in ulang.' };
         }
 
@@ -712,7 +1130,7 @@ const StorageService = {
             today < reservation.checkInDate || today >= reservation.checkOutDate) {
             return { success: false, message: 'Check-in hanya dapat dilakukan dalam periode reservasi yang valid.' };
         }
-        const cat = readStoredData(StorageKeys.CATS).find(item =>
+        const cat = catsResult.value.find(item =>
             item.id === reservation.catId && item.ownerId === reservation.ownerId
         );
         if (!cat) {
@@ -726,8 +1144,7 @@ const StorageService = {
                 message: 'Identitas kandang wajib diawali huruf/angka dan hanya boleh berisi huruf, angka, spasi, titik, garis bawah, atau tanda hubung (maksimal 60 karakter).'
             };
         }
-        const activeStays = readStoredData(StorageKeys.BOARDING_STAYS)
-            .filter(stay => stay.status === 'Sedang Dititipkan');
+        const activeStays = staysResult.value.filter(stay => stay.status === 'Sedang Dititipkan');
         if (activeStays.some(stay =>
             typeof stay.kennel === 'string' && stay.kennel.trim().toLowerCase() === cleanKennel.toLowerCase()
         )) {
@@ -742,7 +1159,7 @@ const StorageService = {
         });
         if (!availability.available) return { success: false, message: availability.message };
 
-        const stays = readStoredData(StorageKeys.BOARDING_STAYS);
+        const stays = staysResult.value;
         const stay = {
             id: this.generateUniqueRecordId('STAY', stays),
             reservationId: reservation.id,
@@ -776,7 +1193,11 @@ const StorageService = {
         if (!user || !['owner', 'staff_ops'].includes(user.role)) {
             return { success: false, message: 'Anda tidak memiliki izin melakukan check-out.' };
         }
-        const stays = readStoredData(StorageKeys.BOARDING_STAYS);
+        const staysResult = readStoredCollection(StorageKeys.BOARDING_STAYS);
+        if (!staysResult.success || !staysResult.value.every(isStoredRecord)) {
+            return { success: false, message: 'Data penitipan tidak dapat dibaca; check-out tidak disimpan.' };
+        }
+        const stays = staysResult.value;
         const index = stays.findIndex(stay => stay.id === stayId);
         if (index < 0 || stays[index].status !== 'Sedang Dititipkan') {
             return { success: false, message: 'Hanya kucing yang sedang dititipkan dapat menjalani check-out.' };
@@ -801,13 +1222,25 @@ const StorageService = {
         if (!reportData || typeof reportData !== 'object') {
             return { success: false, message: 'Data laporan harian tidak valid.' };
         }
-        const stay = this.getBoardingStayById(reportData.boardingStayId);
+        const staysResult = readStoredCollection(StorageKeys.BOARDING_STAYS);
+        const reservationsResult = readStoredCollection(StorageKeys.RESERVATIONS);
+        const catsResult = readStoredCollection(StorageKeys.CATS);
+        const reportsResult = readStoredCollection(StorageKeys.DAILY_REPORTS);
+        if (!staysResult.success || !reservationsResult.success ||
+            !catsResult.success || !reportsResult.success) {
+            return { success: false, message: 'Data penitipan, reservasi, kucing, atau laporan tidak dapat dibaca; laporan tidak disimpan.' };
+        }
+        if (![staysResult, reservationsResult, catsResult, reportsResult]
+            .every(result => result.value.every(isStoredRecord))) {
+            return { success: false, message: 'Struktur data penitipan, reservasi, kucing, atau laporan tidak valid.' };
+        }
+
+        const stay = staysResult.value.find(item => item.id === reportData.boardingStayId);
         if (!stay || stay.status !== 'Sedang Dititipkan') {
             return { success: false, message: 'Laporan hanya dapat dibuat atau diperbarui untuk kucing yang sedang dititipkan.' };
         }
-        const reservation = readStoredData(StorageKeys.RESERVATIONS)
-            .find(item => item.id === stay.reservationId);
-        const cat = readStoredData(StorageKeys.CATS).find(item =>
+        const reservation = reservationsResult.value.find(item => item.id === stay.reservationId);
+        const cat = catsResult.value.find(item =>
             item.id === stay.catId && item.ownerId === stay.ownerId
         );
         if (!reservation || !cat || reservation.catId !== stay.catId) {
@@ -832,7 +1265,7 @@ const StorageService = {
             values[field] = value;
         }
 
-        const reports = readStoredData(StorageKeys.DAILY_REPORTS);
+        const reports = reportsResult.value;
         const index = reportData.id ? reports.findIndex(report => report.id === reportData.id) : -1;
         const existing = index >= 0 ? reports[index] : null;
         if (reportData.id && !existing) return { success: false, message: 'Laporan harian tidak ditemukan.' };
@@ -942,7 +1375,23 @@ const StorageService = {
             return { success: false, message: 'Anda tidak memiliki izin menyimpan reservasi.' };
         }
 
-        const reservations = readStoredData(StorageKeys.RESERVATIONS);
+        const reservationsResult = readStoredCollection(StorageKeys.RESERVATIONS);
+        const catsResult = readStoredCollection(StorageKeys.CATS);
+        const staysResult = readStoredCollection(StorageKeys.BOARDING_STAYS);
+        const usersResult = readStoredCollection(StorageKeys.USERS);
+        if (!reservationsResult.success || !catsResult.success ||
+            !staysResult.success || !usersResult.success) {
+            return { success: false, message: 'Data reservasi, kucing, penitipan, atau pengguna tidak dapat dibaca; reservasi tidak disimpan.' };
+        }
+        if (![reservationsResult, catsResult, staysResult, usersResult]
+            .every(result => result.value.every(isStoredRecord))) {
+            return { success: false, message: 'Struktur data reservasi, kucing, penitipan, atau pengguna tidak valid.' };
+        }
+
+        const reservations = reservationsResult.value;
+        const cats = catsResult.value;
+        const stays = staysResult.value;
+        const users = usersResult.value;
         const index = reservationData.id
             ? reservations.findIndex(reservation => reservation.id === reservationData.id)
             : -1;
@@ -962,12 +1411,20 @@ const StorageService = {
         if (existingReservation && reservationData.catId !== existingReservation.catId) {
             return { success: false, message: 'Kucing pada reservasi tidak dapat diganti.' };
         }
-        if (existingReservation && readStoredData(StorageKeys.BOARDING_STAYS)
-            .some(stay => stay.reservationId === existingReservation.id)) {
+        if (existingReservation && stays.some(stay => stay.reservationId === existingReservation.id)) {
             return { success: false, message: 'Reservasi yang sudah memiliki riwayat penitipan tidak dapat diedit.' };
         }
+        if (existingReservation) {
+            const billsResult = readBillingCollection(StorageKeys.BILLING_BILLS);
+            if (!billsResult.success) {
+                return { success: false, message: 'Data tagihan tidak dapat diperiksa; reservasi tidak diubah.' };
+            }
+            if (billsResult.value.some(bill => bill.reservationId === existingReservation.id)) {
+                return { success: false, message: 'Reservasi yang sudah ditagihkan tidak dapat diedit.' };
+            }
+        }
 
-        const cat = readStoredData(StorageKeys.CATS).find(item => item.id === reservationData.catId);
+        const cat = cats.find(item => item.id === reservationData.catId);
         if (!cat || (user.role === 'customer' && cat.ownerId !== user.id)) {
             return { success: false, message: 'Pilih kucing milik akun Anda.' };
         }
@@ -994,7 +1451,7 @@ const StorageService = {
             } while (ids.has(reservationId));
         }
 
-        const owner = readStoredData(StorageKeys.USERS).find(item => item.id === cat.ownerId);
+        const owner = users.find(item => item.id === cat.ownerId);
         const reservation = {
             ...(existingReservation || {}),
             id: reservationId,
@@ -1060,11 +1517,15 @@ const StorageService = {
         if (!customer || customer.role !== 'customer' || !customer.name || !customer.email || !customer.phone) {
             return { success: false, message: 'Data akun customer tidak lengkap atau tidak valid.' };
         }
-        if (this.emailExists(customer.email)) {
+        const usersResult = readStoredCollection(StorageKeys.USERS);
+        if (!usersResult.success || !usersResult.value.every(isStoredRecord)) {
+            return { success: false, message: 'Data pengguna tidak dapat dibaca; akun tidak disimpan.' };
+        }
+        const users = usersResult.value;
+        const normalizedEmail = String(customer.email).trim().toLowerCase();
+        if (users.some(user => String(user.email || '').toLowerCase() === normalizedEmail)) {
             return { success: false, message: 'Email sudah terdaftar.' };
         }
-
-        const users = readStoredData(StorageKeys.USERS);
         users.push(customer);
         if (!writeStoredData(StorageKeys.USERS, users)) {
             return { success: false, message: 'Gagal menyimpan akun. Periksa ruang penyimpanan browser.' };
@@ -1092,7 +1553,14 @@ const StorageService = {
             return { success: false, message: 'Anda tidak memiliki izin mengelola data kucing.' };
         }
 
-        const cats = readStoredData(StorageKeys.CATS);
+        const catsResult = readStoredCollection(StorageKeys.CATS);
+        const usersResult = readStoredCollection(StorageKeys.USERS);
+        if (!catsResult.success || !usersResult.success ||
+            ![catsResult, usersResult].every(result => result.value.every(isStoredRecord))) {
+            return { success: false, message: 'Data kucing atau pengguna tidak dapat dibaca; perubahan tidak disimpan.' };
+        }
+        const cats = catsResult.value;
+        const users = usersResult.value;
         const index = catData.id ? cats.findIndex(cat => cat.id === catData.id) : -1;
         const existingCat = index >= 0 ? cats[index] : null;
         if (catData.id && !existingCat) {
@@ -1110,7 +1578,7 @@ const StorageService = {
             ownerName = user.name;
         } else {
             ownerId = catData.ownerId || (existingCat && existingCat.ownerId);
-            const owner = readStoredData(StorageKeys.USERS).find(item =>
+            const owner = users.find(item =>
                 item.id === ownerId && item.role === 'customer'
             );
             if (!owner) {
@@ -1195,17 +1663,24 @@ const StorageService = {
         if (!user || !['owner', 'staff_ops', 'customer'].includes(user.role)) {
             return { success: false, message: 'Anda tidak memiliki izin menghapus data kucing.' };
         }
-        const cats = readStoredData(StorageKeys.CATS);
+        const catsResult = readStoredCollection(StorageKeys.CATS);
+        const reservationsResult = readStoredCollection(StorageKeys.RESERVATIONS);
+        const staysResult = readStoredCollection(StorageKeys.BOARDING_STAYS);
+        const reportsResult = readStoredCollection(StorageKeys.DAILY_REPORTS);
+        if (!catsResult.success || !reservationsResult.success ||
+            !staysResult.success || !reportsResult.success ||
+            ![catsResult, reservationsResult, staysResult, reportsResult]
+                .every(result => result.value.every(isStoredRecord))) {
+            return { success: false, message: 'Data kucing atau riwayat terkait tidak dapat dibaca; kucing tidak dihapus.' };
+        }
+        const cats = catsResult.value;
         const cat = cats.find(item => item.id === catId);
         if (!cat || (user.role === 'customer' && cat.ownerId !== user.id)) {
             return { success: false, message: 'Data kucing tidak ditemukan atau bukan milik Anda.' };
         }
-        const hasReservationHistory = readStoredData(StorageKeys.RESERVATIONS)
-            .some(reservation => reservation.catId === catId);
-        const hasBoardingHistory = readStoredData(StorageKeys.BOARDING_STAYS)
-            .some(stay => stay.catId === catId);
-        const hasReportHistory = readStoredData(StorageKeys.DAILY_REPORTS)
-            .some(report => report.catId === catId);
+        const hasReservationHistory = reservationsResult.value.some(reservation => reservation.catId === catId);
+        const hasBoardingHistory = staysResult.value.some(stay => stay.catId === catId);
+        const hasReportHistory = reportsResult.value.some(report => report.catId === catId);
         if (hasReservationHistory || hasBoardingHistory || hasReportHistory) {
             return {
                 success: false,
@@ -1228,7 +1703,9 @@ const StorageService = {
     updatePickupStatus(pickupId, newStatus) {
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
         if (!user || user.role !== 'staff_driver' || newStatus !== 'Selesai') return false;
-        const pickups = readStoredData(StorageKeys.PICKUPS);
+        const pickupsResult = readStoredCollection(StorageKeys.PICKUPS);
+        if (!pickupsResult.success || !pickupsResult.value.every(isStoredRecord)) return false;
+        const pickups = pickupsResult.value;
         const index = pickups.findIndex(p => p.id === pickupId);
         if (index !== -1 && pickups[index].driverName === user.name) {
             pickups[index].status = newStatus;
@@ -1243,12 +1720,19 @@ const StorageService = {
     updateReservationStatus(reservationId, newStatus) {
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
         if (!user || user.role !== 'owner' || !['Dikonfirmasi', 'Dibatalkan'].includes(newStatus)) return false;
-        const reservations = readStoredData(StorageKeys.RESERVATIONS);
+        const reservationsResult = readStoredCollection(StorageKeys.RESERVATIONS);
+        const staysResult = readStoredCollection(StorageKeys.BOARDING_STAYS);
+        if (!reservationsResult.success || !staysResult.success ||
+            ![reservationsResult, staysResult].every(result => result.value.every(isStoredRecord))) return false;
+        const reservations = reservationsResult.value;
         const index = reservations.findIndex(r => r.id === reservationId);
-        const hasBoardingStay = readStoredData(StorageKeys.BOARDING_STAYS)
-            .some(stay => stay.reservationId === reservationId);
+        const hasBoardingStay = staysResult.value.some(stay => stay.reservationId === reservationId);
+        const billsResult = readBillingCollection(StorageKeys.BILLING_BILLS);
+        if (!billsResult.success) return false;
+        const hasBillingBill = billsResult.value.some(bill => bill.reservationId === reservationId);
         const validTransition = index !== -1 &&
             !hasBoardingStay &&
+            !(newStatus === 'Dibatalkan' && hasBillingBill) &&
             ((reservations[index].status === 'Menunggu Konfirmasi' && ['Dikonfirmasi', 'Dibatalkan'].includes(newStatus)) ||
                 (reservations[index].status === 'Dikonfirmasi' && newStatus === 'Dibatalkan'));
         if (validTransition) {

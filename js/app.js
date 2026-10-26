@@ -135,7 +135,8 @@ const App = {
                 { id: 'cats', label: 'Data Kucing & Cek Awal', icon: '🩺' },
                 { id: 'reservations', label: 'Daftar Reservasi', icon: '📅' },
                 { id: 'boarding', label: 'Check-In & Check-Out', icon: '🏨' },
-                { id: 'reports', label: 'Input Daily Report', icon: '📝' }
+                { id: 'reports', label: 'Input Daily Report', icon: '📝' },
+                { id: 'payments', label: 'Tagihan & Pembayaran', icon: '💰' }
             ];
         } else if (role === 'staff_driver') {
             menuItems = [
@@ -180,7 +181,7 @@ const App = {
     getAllowedModules(role) {
         const permissions = {
             owner: ['dashboard', 'cats', 'reservations', 'boarding', 'reports', 'pickup', 'payments'],
-            staff_ops: ['dashboard', 'cats', 'reservations', 'boarding', 'reports'],
+            staff_ops: ['dashboard', 'cats', 'reservations', 'boarding', 'reports', 'payments'],
             staff_driver: ['dashboard', 'pickup', 'history'],
             customer: ['dashboard', 'my-cats', 'new-reservation', 'my-boarding', 'my-reports', 'my-billing']
         };
@@ -219,6 +220,8 @@ const App = {
             BoardingModule.render(contentContainer, this.currentUser, 'stays');
         } else if (moduleId === 'reports' || moduleId === 'my-reports') {
             BoardingModule.render(contentContainer, this.currentUser, 'reports');
+        } else if (moduleId === 'payments' || moduleId === 'my-billing') {
+            BillingModule.render(contentContainer, this.currentUser);
         } else {
             // Tampilan placeholder informatif untuk modul tahap selanjutnya
             contentContainer.innerHTML = `
