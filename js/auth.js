@@ -35,6 +35,7 @@ const AuthService = {
                 address: storedUser.address || ''
             };
         } catch (e) {
+            if (e && e.name === 'StoredDataReadError') throw e;
             console.error('Error saat membaca session:', e);
             sessionStorage.removeItem(SESSION_KEY);
             return null;

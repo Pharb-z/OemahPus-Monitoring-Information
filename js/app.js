@@ -136,6 +136,7 @@ const App = {
                 { id: 'reservations', label: 'Daftar Reservasi', icon: '📅' },
                 { id: 'boarding', label: 'Check-In & Check-Out', icon: '🏨' },
                 { id: 'reports', label: 'Input Daily Report', icon: '📝' },
+                { id: 'pickup', label: 'Pengelolaan Antar-Jemput', icon: '🚗' },
                 { id: 'payments', label: 'Tagihan & Pembayaran', icon: '💰' }
             ];
         } else if (role === 'staff_driver') {
@@ -181,7 +182,7 @@ const App = {
     getAllowedModules(role) {
         const permissions = {
             owner: ['dashboard', 'cats', 'reservations', 'boarding', 'reports', 'pickup', 'payments'],
-            staff_ops: ['dashboard', 'cats', 'reservations', 'boarding', 'reports', 'payments'],
+            staff_ops: ['dashboard', 'cats', 'reservations', 'boarding', 'reports', 'pickup', 'payments'],
             staff_driver: ['dashboard', 'pickup', 'history'],
             customer: ['dashboard', 'my-cats', 'new-reservation', 'my-boarding', 'my-reports', 'my-billing']
         };
@@ -222,6 +223,8 @@ const App = {
             BoardingModule.render(contentContainer, this.currentUser, 'reports');
         } else if (moduleId === 'payments' || moduleId === 'my-billing') {
             BillingModule.render(contentContainer, this.currentUser);
+        } else if (moduleId === 'pickup' && ['owner', 'staff_ops'].includes(this.currentUser.role)) {
+            PickupModule.render(contentContainer, this.currentUser);
         } else {
             // Tampilan placeholder informatif untuk modul tahap selanjutnya
             contentContainer.innerHTML = `

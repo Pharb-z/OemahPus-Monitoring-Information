@@ -193,6 +193,33 @@ const ReservationsModule = {
             return;
         }
 
+        const pickupConfiguration = reservation
+            ? StorageService.getReservationPickupConfiguration(reservation)
+            : { state: 'valid', pickupType: 'none', needPickup: false, pickupAddress: '' };
+        let hasRelatedPickups = false;
+        if (reservation) {
+            let pickups;
+            try {
+                pickups = StorageService.getPickups();
+            } catch (error) {
+                Utils.showToast(
+                    'Data tugas antar-jemput tidak dapat diperiksa; reservasi tidak dapat diedit.',
+                    'error'
+                );
+                return;
+            }
+            if (!Array.isArray(pickups) || !pickups.every(pickup =>
+                pickup !== null && typeof pickup === 'object' && !Array.isArray(pickup)
+            )) {
+                Utils.showToast(
+                    'Struktur data tugas antar-jemput tidak valid; reservasi tidak dapat diedit.',
+                    'error'
+                );
+                return;
+            }
+            hasRelatedPickups = pickups.some(pickup => pickup.reservationId === reservation.id);
+        }
+
         const modal = document.getElementById('reservation-modal-container');
         if (!modal) return;
         const today = new Date();
@@ -204,6 +231,8 @@ const ReservationsModule = {
         const initialCheckIn = reservation ? reservation.checkInDate : '';
         const initialCheckOut = reservation ? reservation.checkOutDate : '';
         const initialCatId = reservation ? reservation.catId : '';
+        const canConfigurePickup = !reservation || pickupConfiguration.state === 'valid';
+        const pickupFieldsLocked = !!reservation && hasRelatedPickups;
 
         modal.innerHTML = `
             <div class="modal-backdrop" id="reservation-form-backdrop">
@@ -238,6 +267,40 @@ const ReservationsModule = {
                                     <input type="date" id="reservation-check-out" class="form-control" min="${minDate}" value="${Utils.escapeHtml(initialCheckOut)}" required>
                                 </div>
                             </div>
+                            ${canConfigurePickup ? `
+                                <div class="form-group">
+                                    <label class="form-label" for="reservation-pickup-type">Layanan antar-jemput</label>
+                                    <select id="reservation-pickup-type" class="form-control"
+                                        ${pickupFieldsLocked ? 'disabled' : ''}>
+                                        <option value="none" ${pickupConfiguration.pickupType === 'none' ? 'selected' : ''}>Tanpa layanan antar-jemput</option>
+                                        <option value="pickup" ${pickupConfiguration.pickupType === 'pickup' ? 'selected' : ''}>Penjemputan</option>
+                                        <option value="delivery" ${pickupConfiguration.pickupType === 'delivery' ? 'selected' : ''}>Pengantaran kembali</option>
+                                        <option value="both" ${pickupConfiguration.pickupType === 'both' ? 'selected' : ''}>Penjemputan dan pengantaran kembali</option>
+                                    </select>
+                                </div>
+                                <div class="form-group" id="reservation-pickup-address-group"
+                                    style="${pickupConfiguration.pickupType === 'none' ? 'display: none;' : ''}">
+                                    <label class="form-label" for="reservation-pickup-address">Alamat awal reservasi <span class="required">*</span></label>
+                                    <input type="text" id="reservation-pickup-address" class="form-control"
+                                        maxlength="500" value="${Utils.escapeHtml(pickupConfiguration.pickupAddress || '')}"
+                                        ${pickupConfiguration.pickupType === 'none' ? '' : 'required'}
+                                        ${pickupFieldsLocked ? 'disabled' : ''}>
+                                    <small class="form-helper">
+                                        Alamat ini menjadi nilai awal tugas; Owner atau Staf Operasional dapat menyesuaikan alamat pada setiap tugas antar-jemput.
+                                    </small>
+                                </div>
+                                ${pickupFieldsLocked ? `
+                                    <div class="health-callout">
+                                        Layanan antar-jemput tidak dapat diubah dari form reservasi karena sudah memiliki tugas terkait.
+                                        Alamat tiap tugas dapat diatur melalui pengelolaan antar-jemput.
+                                    </div>
+                                ` : ''}
+                            ` : `
+                                <div class="health-callout">
+                                    ${Utils.escapeHtml(pickupConfiguration.message)}
+                                    Konfigurasi lama dipertahankan dan tidak dapat diubah dari form ini.
+                                </div>
+                            `}
                             <div id="reservation-availability" class="badge badge-info" aria-live="polite">
                                 Pilih kucing dan tanggal untuk memeriksa ketersediaan kandang.
                             </div>
@@ -254,6 +317,17 @@ const ReservationsModule = {
         const close = () => { modal.innerHTML = ''; };
         modal.querySelector('#reservation-modal-close').addEventListener('click', close);
         modal.querySelector('#reservation-modal-cancel').addEventListener('click', close);
+
+        const pickupTypeInput = modal.querySelector('#reservation-pickup-type');
+        const pickupAddressInput = modal.querySelector('#reservation-pickup-address');
+        if (pickupTypeInput && !pickupFieldsLocked) {
+            pickupTypeInput.addEventListener('change', () => {
+                const requiresAddress = pickupTypeInput.value !== 'none';
+                modal.querySelector('#reservation-pickup-address-group').style.display =
+                    requiresAddress ? '' : 'none';
+                pickupAddressInput.required = requiresAddress;
+            });
+        }
 
         const checkAvailability = () => {
             const catId = modal.querySelector('#reservation-cat').value;
@@ -282,12 +356,32 @@ const ReservationsModule = {
 
         modal.querySelector('#reservation-form').addEventListener('submit', event => {
             event.preventDefault();
-            const result = StorageService.saveReservation({
+            const reservationData = {
                 id: reservation ? reservation.id : undefined,
                 catId: reservation ? reservation.catId : modal.querySelector('#reservation-cat').value,
                 checkInDate: modal.querySelector('#reservation-check-in').value,
                 checkOutDate: modal.querySelector('#reservation-check-out').value
-            });
+            };
+            if (canConfigurePickup) {
+                const pickupType = pickupTypeInput.value;
+                const pickupAddress = pickupType === 'none' ? '' : pickupAddressInput.value.trim();
+                if (!['none', 'pickup', 'delivery', 'both'].includes(pickupType) ||
+                    (pickupType !== 'none' && (!pickupAddress || pickupAddress.length > 500))) {
+                    Utils.showToast(
+                        pickupType === 'none'
+                            ? 'Pilihan layanan antar-jemput tidak valid.'
+                            : 'Alamat layanan wajib diisi maksimal 500 karakter.',
+                        'error'
+                    );
+                    return;
+                }
+                Object.assign(reservationData, {
+                    pickupType,
+                    needPickup: pickupType !== 'none',
+                    pickupAddress
+                });
+            }
+            const result = StorageService.saveReservation(reservationData);
             if (!result.success) {
                 Utils.showToast(result.message, 'error');
                 checkAvailability();
@@ -311,6 +405,26 @@ const ReservationsModule = {
             return;
         }
         const stay = StorageService.getBoardingStayByReservationId(reservationId);
+        const pickupConfiguration = StorageService.getReservationPickupConfiguration(reservation);
+        const pickupTypeLabels = {
+            none: 'Tanpa layanan antar-jemput',
+            pickup: 'Penjemputan',
+            delivery: 'Pengantaran kembali',
+            both: 'Penjemputan dan pengantaran kembali'
+        };
+        const pickupDetails = pickupConfiguration.state === 'valid'
+            ? `
+                <p><strong>Layanan antar-jemput:</strong> ${Utils.escapeHtml(pickupTypeLabels[pickupConfiguration.pickupType])}</p>
+                ${pickupConfiguration.pickupType !== 'none' && pickupConfiguration.pickupAddress
+                    ? `<p><strong>Alamat awal reservasi:</strong> ${Utils.escapeHtml(pickupConfiguration.pickupAddress)}</p>`
+                    : ''}
+            `
+            : `
+                <p><strong>Layanan antar-jemput:</strong> ${Utils.escapeHtml(pickupConfiguration.message)}</p>
+                ${typeof reservation.pickupAddress === 'string' && reservation.pickupAddress.trim()
+                    ? `<p><strong>Alamat tersimpan (belum diverifikasi):</strong> ${Utils.escapeHtml(reservation.pickupAddress)}</p>`
+                    : ''}
+            `;
         const modal = document.getElementById('reservation-modal-container');
         if (!modal) return;
         modal.innerHTML = `
@@ -328,6 +442,7 @@ const ReservationsModule = {
                             <p><strong>Check-out:</strong> ${Utils.formatDate(reservation.checkOutDate)} (eksklusif)</p>
                             <p><strong>Lama inap:</strong> ${this.getStayLength(reservation.checkInDate, reservation.checkOutDate)} malam</p>
                             <p><strong>Status:</strong> <span class="badge ${this.getStatusBadge(reservation.status)}">${Utils.escapeHtml(reservation.status)}</span></p>
+                            ${pickupDetails}
                             <p><strong>Status penitipan:</strong> ${Utils.escapeHtml(stay ? stay.status : 'Belum Check-In')}</p>
                             ${stay ? `<p><strong>Kandang:</strong> ${Utils.escapeHtml(stay.kennel || 'Belum tercatat')}</p>` : ''}
                             <p><strong>Diajukan:</strong> ${Utils.formatDate(reservation.createdAt)}</p>

@@ -270,6 +270,23 @@ const DashboardModule = {
             roomNumber: stay.kennel,
             checkOutDate: stay.plannedCheckOutDate
         }));
+        const initialChecksRecorded = new Set(
+            activeStays
+                .map(stay => stay.catId)
+                .filter(catId => {
+                    const cat = cats.find(item => item.id === catId);
+                    const initialCheck = cat && cat.initialCheck;
+                    const weight = initialCheck && initialCheck.weight;
+                    const temperature = initialCheck && initialCheck.temperature;
+                    const parasites = initialCheck && initialCheck.parasites;
+                    return Number.isFinite(weight) && weight >= 0.5 && weight <= 25 &&
+                        Number.isInteger(weight * 10) &&
+                        Number.isFinite(temperature) && temperature >= 35 && temperature <= 42.5 &&
+                        Number.isInteger(temperature * 10) &&
+                        typeof parasites === 'string' && parasites.trim() !== '' &&
+                        parasites.trim().toLowerCase() !== 'belum dicatat';
+                })
+        ).size;
         const confirmedReservations = reservations.filter(r =>
             r.status === 'Dikonfirmasi' && !StorageService.getBoardingStayByReservationId(r.id)
         );
@@ -333,8 +350,8 @@ const DashboardModule = {
                     <div class="stat-icon bg-purple-light text-purple">🩺</div>
                     <div class="stat-info">
                         <span class="stat-label">Pemeriksaan Awal</span>
-                        <div class="stat-value">${activeStays.length} Dicatat</div>
-                        <span class="stat-desc text-muted">Kondisi fisik awal saat intake</span>
+                        <div class="stat-value">${initialChecksRecorded} / ${activeStays.length}</div>
+                        <span class="stat-desc text-muted">Kucing aktif dengan catatan pemeriksaan awal yang valid</span>
                     </div>
                 </div>
             </div>

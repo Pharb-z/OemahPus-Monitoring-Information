@@ -16,6 +16,15 @@ const StorageKeys = {
     SETTINGS: 'omi_hotel_settings'
 };
 
+const INITIAL_DATA_REQUIRED_KEYS = [
+    StorageKeys.USERS,
+    StorageKeys.CATS,
+    StorageKeys.RESERVATIONS,
+    StorageKeys.DAILY_REPORTS,
+    StorageKeys.PICKUPS,
+    StorageKeys.SETTINGS
+];
+
 const BOARDING_MIGRATION_JOURNAL_KEY = 'omi_boarding_migration_journal';
 const BOARDING_MIGRATION_TARGET_KEYS = [
     StorageKeys.BOARDING_STAYS,
@@ -23,13 +32,52 @@ const BOARDING_MIGRATION_TARGET_KEYS = [
     StorageKeys.RESERVATIONS
 ];
 
+const LEGACY_PICKUP_FIELDS = [
+    'id',
+    'reservationId',
+    'catName',
+    'ownerName',
+    'phone',
+    'type',
+    'address',
+    'scheduledTime',
+    'status',
+    'driverName',
+    'notes'
+];
+const LEGACY_PICKUP_IDS = new Set(['PCK-401', 'PCK-402', 'PCK-403']);
+
+class StoredDataReadError extends Error {
+    constructor(key, cause) {
+        super(`Data ${key} tidak dapat dibaca dari LocalStorage.`);
+        this.name = 'StoredDataReadError';
+        this.key = key;
+        this.cause = cause;
+    }
+}
+
+const throwStoredDataReadError = (key, cause) => {
+    console.error(`Gagal membaca ${key} dari LocalStorage:`, cause);
+    const readError = new StoredDataReadError(key, cause);
+    if (typeof Utils !== 'undefined') Utils.showToast(readError.message, 'error');
+    throw readError;
+};
+
 const readStoredData = (key) => {
+    let data;
     try {
-        const data = localStorage.getItem(key);
-        return data ? JSON.parse(data) : [];
+        data = localStorage.getItem(key);
     } catch (error) {
-        console.error(`Gagal membaca ${key} dari LocalStorage:`, error);
-        return [];
+        throwStoredDataReadError(key, error);
+    }
+    if (data === null) {
+        if (!INITIAL_DATA_REQUIRED_KEYS.includes(key)) return [];
+        throwStoredDataReadError(key, new Error('Key wajib tidak tersedia.'));
+    }
+    try {
+        return JSON.parse(data);
+    } catch (error) {
+        throwStoredDataReadError(key, error);
     }
 };
 
@@ -49,6 +97,180 @@ const readStoredCollection = (key) => {
 };
 
 const isStoredRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+const readRequiredStoredCollection = key => {
+    let raw;
+    try {
+        raw = localStorage.getItem(key);
+    } catch (error) {
+        console.error(`Gagal membaca ${key} dari LocalStorage:`, error);
+        return { success: false, message: `Data ${key} tidak dapat dibaca.` };
+    }
+    if (raw === null) {
+        return { success: false, message: `Data ${key} tidak tersedia.` };
+    }
+    try {
+        const value = JSON.parse(raw);
+        if (!Array.isArray(value) || !value.every(isStoredRecord)) {
+            return { success: false, message: `Struktur data ${key} tidak valid.` };
+        }
+        return { success: true, value };
+    } catch (error) {
+        console.error(`Gagal membaca ${key} dari LocalStorage:`, error);
+        return { success: false, message: `Data ${key} tidak dapat dibaca.` };
+    }
+};
+
+const RESERVATION_PICKUP_TYPES = ['none', 'pickup', 'delivery', 'both'];
+const RESERVATION_PICKUP_FIELDS = ['pickupType', 'needPickup', 'pickupAddress'];
+const inspectReservationPickupConfiguration = reservation => {
+    const presentFields = RESERVATION_PICKUP_FIELDS.filter(field =>
+        Object.prototype.hasOwnProperty.call(reservation, field)
+    );
+    if (presentFields.length === 0) {
+        return { state: 'unconfigured', message: 'Data lama belum memiliki konfigurasi layanan antar-jemput.' };
+    }
+    if (presentFields.length !== RESERVATION_PICKUP_FIELDS.length) {
+        return { state: 'invalid', message: 'Data layanan antar-jemput lama tidak lengkap.' };
+    }
+    const { pickupType, needPickup, pickupAddress } = reservation;
+    if (!RESERVATION_PICKUP_TYPES.includes(pickupType) ||
+        typeof needPickup !== 'boolean' ||
+        needPickup !== (pickupType !== 'none') ||
+        typeof pickupAddress !== 'string' ||
+        pickupAddress.length > 500 ||
+        (pickupType === 'none' ? pickupAddress.trim() !== '' : !pickupAddress.trim())) {
+        return { state: 'invalid', message: 'Data layanan antar-jemput lama tidak konsisten atau tidak valid.' };
+    }
+    return {
+        state: 'valid',
+        pickupType,
+        needPickup,
+        pickupAddress
+    };
+};
+
+const isLegacyPickupRecord = pickup =>
+    isStoredRecord(pickup) &&
+    LEGACY_PICKUP_IDS.has(pickup.id) &&
+    !Object.prototype.hasOwnProperty.call(pickup, 'driverId') &&
+    Object.keys(pickup).length === LEGACY_PICKUP_FIELDS.length &&
+    LEGACY_PICKUP_FIELDS.every(field => Object.prototype.hasOwnProperty.call(pickup, field)) &&
+    typeof pickup.driverName === 'string' &&
+    pickup.driverName.length > 0;
+
+const readStoredDriverUsers = () => {
+    const usersResult = readStoredCollection(StorageKeys.USERS);
+    if (!usersResult.success || !usersResult.value.every(isStoredRecord)) {
+        return {
+            success: false,
+            message: usersResult.message || 'Struktur data pengguna tidak valid.'
+        };
+    }
+    return {
+        success: true,
+        value: usersResult.value.filter(user =>
+            user.role === 'staff_driver' && typeof user.id === 'string' && user.id.length > 0
+        )
+    };
+};
+
+const isPickupAssignedToDriver = (pickup, user, drivers) => {
+    if (Object.prototype.hasOwnProperty.call(pickup, 'driverId')) {
+        return typeof pickup.driverId === 'string' && pickup.driverId === user.id;
+    }
+    if (!isLegacyPickupRecord(pickup)) return false;
+    const matchingDrivers = drivers.filter(driver => driver.name === pickup.driverName);
+    return matchingDrivers.length === 1 && matchingDrivers[0].id === user.id;
+};
+
+const PICKUP_SERVICE_TYPES = {
+    pickup: ['Penjemputan'],
+    delivery: ['Pengantaran Kembali'],
+    both: ['Penjemputan', 'Pengantaran Kembali']
+};
+const PICKUP_SCHEDULABLE_RESERVATION_STATUSES = ['Dikonfirmasi', 'Sedang Menginap'];
+
+const normalizePickupScheduledTime = value => {
+    const match = typeof value === 'string'
+        ? value.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?: WIB)?$/)
+        : null;
+    if (!match) return null;
+    const [, yearText, monthText, dayText, hourText, minuteText] = match;
+    const year = Number(yearText);
+    const month = Number(monthText);
+    const day = Number(dayText);
+    const hour = Number(hourText);
+    const minute = Number(minuteText);
+    const date = new Date(year, month - 1, day, hour, minute);
+    if (date.getFullYear() !== year || date.getMonth() !== month - 1 ||
+        date.getDate() !== day || date.getHours() !== hour || date.getMinutes() !== minute) {
+        return null;
+    }
+    return `${yearText}-${monthText}-${dayText} ${hourText}:${minuteText} WIB`;
+};
+
+const readPickupOperationCollections = () => {
+    const pickups = readStoredData(StorageKeys.PICKUPS);
+    const reservations = readStoredData(StorageKeys.RESERVATIONS);
+    const cats = readStoredData(StorageKeys.CATS);
+    const users = readStoredData(StorageKeys.USERS);
+    const collections = [
+        [StorageKeys.PICKUPS, pickups],
+        [StorageKeys.RESERVATIONS, reservations],
+        [StorageKeys.CATS, cats],
+        [StorageKeys.USERS, users]
+    ];
+    const invalid = collections.find(([key, value]) =>
+        !Array.isArray(value) || !value.every(isStoredRecord)
+    );
+    if (invalid) {
+        return { success: false, message: `Struktur data ${invalid[0]} tidak valid.` };
+    }
+    return { success: true, pickups, reservations, cats, users };
+};
+
+const getPickupReservationContext = (reservation, cats, users) => {
+    if (!isStoredRecord(reservation) ||
+        !PICKUP_SCHEDULABLE_RESERVATION_STATUSES.includes(reservation.status) ||
+        reservation.needPickup !== true ||
+        !Object.prototype.hasOwnProperty.call(PICKUP_SERVICE_TYPES, reservation.pickupType) ||
+        typeof reservation.id !== 'string' || !reservation.id ||
+        typeof reservation.catId !== 'string' || !reservation.catId ||
+        typeof reservation.ownerId !== 'string' || !reservation.ownerId) {
+        return { success: false, message: 'Reservasi tidak memenuhi syarat penjadwalan antar-jemput.' };
+    }
+    const catMatches = cats.filter(cat => cat.id === reservation.catId);
+    const ownerMatches = users.filter(user => user.id === reservation.ownerId);
+    if (catMatches.length !== 1 || catMatches[0].ownerId !== reservation.ownerId ||
+        typeof catMatches[0].name !== 'string' || !catMatches[0].name.trim() ||
+        ownerMatches.length !== 1 || ownerMatches[0].role !== 'customer' ||
+        typeof ownerMatches[0].name !== 'string' || !ownerMatches[0].name.trim()) {
+        return { success: false, message: 'Relasi kucing atau pemilik reservasi tidak valid.' };
+    }
+    const address = String(reservation.pickupAddress || '').trim();
+    if (!address) {
+        return { success: false, message: 'Alamat layanan belum tersedia pada reservasi.' };
+    }
+    return {
+        success: true,
+        reservation,
+        cat: catMatches[0],
+        owner: ownerMatches[0],
+        address,
+        serviceTypes: PICKUP_SERVICE_TYPES[reservation.pickupType]
+    };
+};
+
+const writeVerifiedPickupCollection = pickups => {
+    if (!writeStoredData(StorageKeys.PICKUPS, pickups)) return false;
+    try {
+        return localStorage.getItem(StorageKeys.PICKUPS) === JSON.stringify(pickups);
+    } catch (error) {
+        console.error(`Gagal memverifikasi ${StorageKeys.PICKUPS} setelah penyimpanan:`, error);
+        return false;
+    }
+};
 
 const writeStoredData = (key, value) => {
     try {
@@ -94,9 +316,56 @@ const StorageService = {
         this.initializationReady = false;
         this.initializationError = '';
         try {
-            if (!localStorage.getItem(StorageKeys.USERS)) {
+            const storedValues = new Map(
+                [...Object.values(StorageKeys), BOARDING_MIGRATION_JOURNAL_KEY]
+                    .map(key => [key, localStorage.getItem(key)])
+            );
+            const hasStoredApplicationData = [...storedValues.values()].some(value => value !== null);
+            if (!hasStoredApplicationData) {
                 if (!this.seedAllData()) {
                     this.initializationError = 'Data awal OMI tidak dapat disiapkan.';
+                    console.error(this.initializationError);
+                    return false;
+                }
+            } else {
+                const missingKeys = INITIAL_DATA_REQUIRED_KEYS.filter(key => storedValues.get(key) === null);
+                if (missingKeys.length > 0) {
+                    this.initializationError =
+                        `Penyimpanan OMI tidak lengkap (${missingKeys.join(', ')} tidak tersedia). Data dipertahankan dan aplikasi dinonaktifkan.`;
+                    console.error(this.initializationError);
+                    return false;
+                }
+
+                const invalidCollectionKeys = [
+                    StorageKeys.USERS,
+                    StorageKeys.CATS,
+                    StorageKeys.RESERVATIONS,
+                    StorageKeys.DAILY_REPORTS,
+                    StorageKeys.PICKUPS
+                ].filter(key => {
+                    try {
+                        return !Array.isArray(JSON.parse(storedValues.get(key)));
+                    } catch (error) {
+                        return true;
+                    }
+                });
+                const settings = (() => {
+                    try {
+                        return JSON.parse(storedValues.get(StorageKeys.SETTINGS));
+                    } catch (error) {
+                        return null;
+                    }
+                })();
+                if (invalidCollectionKeys.length > 0 ||
+                    !settings || typeof settings !== 'object' || Array.isArray(settings)) {
+                    const invalidKeys = [
+                        ...invalidCollectionKeys,
+                        ...(!settings || typeof settings !== 'object' || Array.isArray(settings)
+                            ? [StorageKeys.SETTINGS]
+                            : [])
+                    ];
+                    this.initializationError =
+                        `Struktur penyimpanan OMI tidak valid (${invalidKeys.join(', ')}). Data dipertahankan dan aplikasi dinonaktifkan.`;
                     console.error(this.initializationError);
                     return false;
                 }
@@ -308,6 +577,14 @@ const StorageService = {
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
         if (user && user.role !== 'owner') {
             console.error('Pengisian ulang data demo hanya diizinkan untuk Owner.');
+            return false;
+        }
+        const existingKeys = [...Object.values(StorageKeys), BOARDING_MIGRATION_JOURNAL_KEY]
+            .filter(key => localStorage.getItem(key) !== null);
+        if (existingKeys.length > 0) {
+            console.error(
+                `Seed data demo ditolak karena penyimpanan OMI sudah berisi data (${existingKeys.join(', ')}).`
+            );
             return false;
         }
         // 1. Akun Pengguna (Tanpa kata sandi - otentikasi demo terpisah)
@@ -524,6 +801,7 @@ const StorageService = {
                 address: 'Jl. Rungkut Asri No. 12, Surabaya',
                 scheduledTime: '2026-10-22 09:00 WIB',
                 status: 'Selesai',
+                driverId: 'USR-DRIVER',
                 driverName: 'Doni Pratama',
                 notes: 'Kucing telah dijemput dan tiba dengan aman di pet hotel.'
             },
@@ -537,6 +815,7 @@ const StorageService = {
                 address: 'Jl. Manyar Kertoarjo No. 45, Surabaya',
                 scheduledTime: '2026-10-23 10:00 WIB',
                 status: 'Selesai',
+                driverId: 'USR-DRIVER',
                 driverName: 'Doni Pratama',
                 notes: 'Penjemputan tepat waktu.'
             },
@@ -550,6 +829,7 @@ const StorageService = {
                 address: 'Jl. Rungkut Asri No. 12, Surabaya',
                 scheduledTime: '2026-10-26 15:00 WIB',
                 status: 'Terjadwal',
+                driverId: 'USR-DRIVER',
                 driverName: 'Doni Pratama',
                 notes: 'Diantar saat check-out sore.'
             }
@@ -565,13 +845,27 @@ const StorageService = {
             contactPhone: '0812-3456-7890'
         };
 
-        localStorage.setItem(StorageKeys.USERS, JSON.stringify(initialUsers));
-        localStorage.setItem(StorageKeys.CATS, JSON.stringify(initialCats));
-        localStorage.setItem(StorageKeys.RESERVATIONS, JSON.stringify(initialReservations));
+        const seedEntries = [
+            [StorageKeys.USERS, initialUsers],
+            [StorageKeys.CATS, initialCats],
+            [StorageKeys.RESERVATIONS, initialReservations],
+            [StorageKeys.DAILY_REPORTS, initialReports],
+            [StorageKeys.PICKUPS, initialPickups],
+            [StorageKeys.SETTINGS, initialSettings]
+        ];
+        for (const [key, value] of seedEntries) {
+            if (!writeStoredData(key, value)) return false;
+            try {
+                if (localStorage.getItem(key) !== JSON.stringify(value)) {
+                    console.error(`Verifikasi penyimpanan data awal ${key} gagal.`);
+                    return false;
+                }
+            } catch (error) {
+                console.error(`Verifikasi penyimpanan data awal ${key} gagal:`, error);
+                return false;
+            }
+        }
         localStorage.removeItem(StorageKeys.BOARDING_STAYS);
-        localStorage.setItem(StorageKeys.DAILY_REPORTS, JSON.stringify(initialReports));
-        localStorage.setItem(StorageKeys.PICKUPS, JSON.stringify(initialPickups));
-        localStorage.setItem(StorageKeys.SETTINGS, JSON.stringify(initialSettings));
         return true;
     },
 
@@ -628,7 +922,20 @@ const StorageService = {
         if (key === StorageKeys.PICKUPS) {
             if (['owner', 'staff_ops'].includes(user.role)) return data;
             if (user.role === 'staff_driver') {
-                return data.filter(item => item.driverName === user.name);
+                if (!data.every(isStoredRecord)) {
+                    throwStoredDataReadError(
+                        StorageKeys.PICKUPS,
+                        new Error('Struktur data antar-jemput tidak valid.')
+                    );
+                }
+                const driversResult = readStoredDriverUsers();
+                if (!driversResult.success) {
+                    throwStoredDataReadError(
+                        StorageKeys.USERS,
+                        new Error(driversResult.message)
+                    );
+                }
+                return data.filter(item => isPickupAssignedToDriver(item, user, driversResult.value));
             }
             if (user.role === 'customer') {
                 const reservationIds = this.getReservations().map(item => item.id);
@@ -659,6 +966,9 @@ const StorageService = {
     },
     getCats() { return this.get(StorageKeys.CATS); },
     getReservations() { return this.get(StorageKeys.RESERVATIONS); },
+    getReservationPickupConfiguration(reservation) {
+        return inspectReservationPickupConfiguration(reservation);
+    },
     getReservationById(reservationId) {
         return this.getReservations().find(reservation => reservation.id === reservationId) || null;
     },
@@ -1370,6 +1680,32 @@ const StorageService = {
         if (!reservationData || typeof reservationData !== 'object') {
             return { success: false, message: 'Data reservasi tidak valid.' };
         }
+        const hasPickupConfiguration = RESERVATION_PICKUP_FIELDS.some(field =>
+            Object.prototype.hasOwnProperty.call(reservationData, field)
+        );
+        if (hasPickupConfiguration &&
+            !RESERVATION_PICKUP_FIELDS.every(field =>
+                Object.prototype.hasOwnProperty.call(reservationData, field)
+            )) {
+            return { success: false, message: 'Konfigurasi layanan antar-jemput tidak lengkap.' };
+        }
+        let pickupConfiguration = null;
+        if (hasPickupConfiguration) {
+            pickupConfiguration = inspectReservationPickupConfiguration(reservationData);
+            if (pickupConfiguration.state !== 'valid') {
+                return {
+                    success: false,
+                    message: pickupConfiguration.message || 'Konfigurasi layanan antar-jemput tidak valid.'
+                };
+            }
+            pickupConfiguration = {
+                pickupType: pickupConfiguration.pickupType,
+                needPickup: pickupConfiguration.needPickup,
+                pickupAddress: pickupConfiguration.pickupType === 'none'
+                    ? ''
+                    : pickupConfiguration.pickupAddress.trim()
+            };
+        }
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
         if (!user || !['owner', 'customer'].includes(user.role)) {
             return { success: false, message: 'Anda tidak memiliki izin menyimpan reservasi.' };
@@ -1423,6 +1759,39 @@ const StorageService = {
                 return { success: false, message: 'Reservasi yang sudah ditagihkan tidak dapat diedit.' };
             }
         }
+        let relatedPickups = [];
+        if (existingReservation) {
+            const pickupsResult = readRequiredStoredCollection(StorageKeys.PICKUPS);
+            if (!pickupsResult.success) {
+                return {
+                    success: false,
+                    message: `${pickupsResult.message} Reservasi tidak diubah.`
+                };
+            }
+            relatedPickups = pickupsResult.value.filter(
+                pickup => pickup.reservationId === existingReservation.id
+            );
+            if (hasPickupConfiguration) {
+                const currentPickupConfiguration =
+                    inspectReservationPickupConfiguration(existingReservation);
+                if (currentPickupConfiguration.state !== 'valid') {
+                    return {
+                        success: false,
+                        message: 'Data layanan antar-jemput lama belum lengkap atau tidak konsisten; konfigurasi tidak dapat diubah dari form reservasi.'
+                    };
+                }
+                const configurationChanged =
+                    pickupConfiguration.pickupType !== currentPickupConfiguration.pickupType ||
+                    pickupConfiguration.needPickup !== currentPickupConfiguration.needPickup ||
+                    pickupConfiguration.pickupAddress !== currentPickupConfiguration.pickupAddress.trim();
+                if (configurationChanged && relatedPickups.length > 0) {
+                    return {
+                        success: false,
+                        message: 'Layanan antar-jemput tidak dapat diubah dari form reservasi karena sudah memiliki tugas terkait.'
+                    };
+                }
+            }
+        }
 
         const cat = cats.find(item => item.id === reservationData.catId);
         if (!cat || (user.role === 'customer' && cat.ownerId !== user.id)) {
@@ -1461,12 +1830,26 @@ const StorageService = {
             ownerName: owner ? owner.name : cat.ownerName,
             checkInDate: reservationData.checkInDate,
             checkOutDate: reservationData.checkOutDate,
-            needPickup: existingReservation ? existingReservation.needPickup : false,
-            pickupType: existingReservation ? existingReservation.pickupType : 'none',
-            pickupAddress: existingReservation ? existingReservation.pickupAddress : '',
             status: existingReservation ? existingReservation.status : 'Menunggu Konfirmasi',
             createdAt: existingReservation ? existingReservation.createdAt : new Date().toISOString().split('T')[0]
         };
+        if (pickupConfiguration) {
+            Object.assign(reservation, pickupConfiguration);
+        } else if (!existingReservation) {
+            Object.assign(reservation, {
+                needPickup: false,
+                pickupType: 'none',
+                pickupAddress: ''
+            });
+        } else if (RESERVATION_PICKUP_FIELDS.every(field =>
+            Object.prototype.hasOwnProperty.call(existingReservation, field)
+        )) {
+            Object.assign(reservation, {
+                needPickup: existingReservation.needPickup,
+                pickupType: existingReservation.pickupType,
+                pickupAddress: existingReservation.pickupAddress
+            });
+        }
         if (existingReservation) reservations[index] = reservation;
         else reservations.push(reservation);
         if (!writeStoredData(StorageKeys.RESERVATIONS, reservations)) {
@@ -1474,7 +1857,161 @@ const StorageService = {
         }
         return { success: true, reservation, isNew: !existingReservation };
     },
+    getPickupManagementData() {
+        const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
+        if (!user || !['owner', 'staff_ops'].includes(user.role)) {
+            return { success: false, message: 'Anda tidak memiliki izin mengelola antar-jemput.' };
+        }
+        const data = readPickupOperationCollections();
+        if (!data.success) return data;
+        const drivers = data.users.filter(driver =>
+            driver.role === 'staff_driver' &&
+            typeof driver.id === 'string' && driver.id &&
+            typeof driver.name === 'string' && driver.name.trim()
+        );
+        const reservations = data.reservations.flatMap(reservation => {
+            const context = getPickupReservationContext(reservation, data.cats, data.users);
+            if (!context.success) return [];
+            const availableTypes = context.serviceTypes.filter(type =>
+                !data.pickups.some(pickup =>
+                    pickup.reservationId === reservation.id && pickup.type === type
+                )
+            );
+            return availableTypes.length > 0
+                ? [{ ...reservation, availablePickupTypes: availableTypes }]
+                : [];
+        });
+        return { success: true, pickups: data.pickups, reservations, drivers };
+    },
     getPickups() { return this.get(StorageKeys.PICKUPS); },
+    createPickup(pickupData) {
+        const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
+        if (!user || !['owner', 'staff_ops'].includes(user.role)) {
+            return { success: false, message: 'Anda tidak memiliki izin membuat tugas antar-jemput.' };
+        }
+        if (!isStoredRecord(pickupData) ||
+            typeof pickupData.reservationId !== 'string' ||
+            typeof pickupData.type !== 'string' ||
+            typeof pickupData.driverId !== 'string' ||
+            typeof pickupData.scheduledTime !== 'string') {
+            return { success: false, message: 'Data tugas antar-jemput tidak valid.' };
+        }
+        const data = readPickupOperationCollections();
+        if (!data.success) return data;
+        const reservationMatches = data.reservations.filter(
+            reservation => reservation.id === pickupData.reservationId
+        );
+        if (reservationMatches.length !== 1) {
+            return { success: false, message: 'Reservasi tidak ditemukan atau ID-nya tidak unik.' };
+        }
+        const context = getPickupReservationContext(reservationMatches[0], data.cats, data.users);
+        if (!context.success) return context;
+        if (!context.serviceTypes.includes(pickupData.type)) {
+            return { success: false, message: 'Jenis tugas tidak sesuai layanan pada reservasi.' };
+        }
+        if (data.pickups.some(pickup =>
+            pickup.reservationId === pickupData.reservationId && pickup.type === pickupData.type
+        )) {
+            return { success: false, message: 'Tugas untuk reservasi dan jenis layanan tersebut sudah ada.' };
+        }
+        const driverMatches = data.users.filter(driver =>
+            driver.id === pickupData.driverId && driver.role === 'staff_driver'
+        );
+        if (driverMatches.length !== 1 ||
+            typeof driverMatches[0].name !== 'string' || !driverMatches[0].name.trim()) {
+            return { success: false, message: 'Driver tidak ditemukan atau bukan akun staf antar-jemput yang valid.' };
+        }
+        const address = String(pickupData.address || '').trim();
+        const scheduledTime = normalizePickupScheduledTime(pickupData.scheduledTime);
+        if (!address || address.length > 500 || !scheduledTime) {
+            return { success: false, message: 'Alamat atau waktu terjadwal tidak valid.' };
+        }
+        const pickup = {
+            id: this.generateUniqueRecordId('PCK', data.pickups),
+            reservationId: context.reservation.id,
+            catId: context.cat.id,
+            ownerId: context.owner.id,
+            catName: context.cat.name,
+            ownerName: context.owner.name,
+            phone: context.owner.phone || '',
+            type: pickupData.type,
+            address,
+            scheduledTime,
+            status: 'Terjadwal',
+            driverId: driverMatches[0].id,
+            driverName: driverMatches[0].name,
+            notes: ''
+        };
+        data.pickups.push(pickup);
+        if (!writeVerifiedPickupCollection(data.pickups)) {
+            return { success: false, message: 'Tugas gagal disimpan atau verifikasi penyimpanan gagal.' };
+        }
+        return { success: true, pickup };
+    },
+    updatePickupAssignment(pickupId, assignmentData) {
+        const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
+        if (!user || !['owner', 'staff_ops'].includes(user.role)) {
+            return { success: false, message: 'Anda tidak memiliki izin mengubah penugasan antar-jemput.' };
+        }
+        if (typeof pickupId !== 'string' || !isStoredRecord(assignmentData) ||
+            typeof assignmentData.driverId !== 'string' ||
+            typeof assignmentData.address !== 'string' ||
+            typeof assignmentData.scheduledTime !== 'string') {
+            return { success: false, message: 'Data penugasan antar-jemput tidak valid.' };
+        }
+        const data = readPickupOperationCollections();
+        if (!data.success) return data;
+        const pickupMatches = data.pickups
+            .map((pickup, index) => ({ pickup, index }))
+            .filter(item => item.pickup.id === pickupId);
+        if (pickupMatches.length !== 1 || pickupMatches[0].pickup.status !== 'Terjadwal') {
+            return { success: false, message: 'Tugas tidak ditemukan, duplikat, atau sudah tidak dapat diubah.' };
+        }
+        const { pickup, index } = pickupMatches[0];
+        const reservationMatches = data.reservations.filter(
+            reservation => reservation.id === pickup.reservationId
+        );
+        if (reservationMatches.length !== 1) {
+            return { success: false, message: 'Reservasi tugas tidak ditemukan atau ID-nya tidak unik.' };
+        }
+        const context = getPickupReservationContext(reservationMatches[0], data.cats, data.users);
+        if (!context.success || !context.serviceTypes.includes(pickup.type)) {
+            return { success: false, message: 'Tugas tidak lagi sesuai dengan layanan reservasi.' };
+        }
+        if (data.pickups.some(item =>
+            item.id !== pickup.id &&
+            item.reservationId === pickup.reservationId &&
+            item.type === pickup.type
+        )) {
+            return { success: false, message: 'Terdapat tugas lain dengan reservasi dan jenis layanan yang sama.' };
+        }
+        const driverMatches = data.users.filter(driver =>
+            driver.id === assignmentData.driverId && driver.role === 'staff_driver'
+        );
+        const address = assignmentData.address.trim();
+        const scheduledTime = normalizePickupScheduledTime(assignmentData.scheduledTime);
+        if (driverMatches.length !== 1 ||
+            typeof driverMatches[0].name !== 'string' || !driverMatches[0].name.trim() ||
+            !address || address.length > 500 || !scheduledTime) {
+            return { success: false, message: 'Driver, alamat, atau waktu terjadwal tidak valid.' };
+        }
+        data.pickups[index] = {
+            ...pickup,
+            catId: context.cat.id,
+            ownerId: context.owner.id,
+            catName: context.cat.name,
+            ownerName: context.owner.name,
+            phone: context.owner.phone || '',
+            address,
+            scheduledTime,
+            driverId: driverMatches[0].id,
+            driverName: driverMatches[0].name
+        };
+        if (!writeVerifiedPickupCollection(data.pickups)) {
+            return { success: false, message: 'Perubahan tugas gagal disimpan atau verifikasi penyimpanan gagal.' };
+        }
+        return { success: true, pickup: data.pickups[index] };
+    },
     getSettings() {
         const settings = this.get(StorageKeys.SETTINGS);
         return settings && !Array.isArray(settings) ? settings : { totalCapacity: 10 };
@@ -1707,7 +2244,10 @@ const StorageService = {
         if (!pickupsResult.success || !pickupsResult.value.every(isStoredRecord)) return false;
         const pickups = pickupsResult.value;
         const index = pickups.findIndex(p => p.id === pickupId);
-        if (index !== -1 && pickups[index].driverName === user.name) {
+        if (index === -1 || pickups[index].status !== 'Terjadwal') return false;
+        const driversResult = readStoredDriverUsers();
+        if (!driversResult.success) return false;
+        if (isPickupAssignedToDriver(pickups[index], user, driversResult.value)) {
             pickups[index].status = newStatus;
             return writeStoredData(StorageKeys.PICKUPS, pickups);
         }
