@@ -354,7 +354,7 @@ const ReservationsModule = {
         if (initialCheckIn) checkOutInput.min = initialCheckIn;
         if (initialCheckIn && initialCheckOut) checkAvailability();
 
-        modal.querySelector('#reservation-form').addEventListener('submit', event => {
+        modal.querySelector('#reservation-form').addEventListener('submit', async event => {
             event.preventDefault();
             const reservationData = {
                 id: reservation ? reservation.id : undefined,
@@ -381,7 +381,7 @@ const ReservationsModule = {
                     pickupAddress
                 });
             }
-            const result = StorageService.saveReservation(reservationData);
+            const result = await StorageService.saveReservation(reservationData);
             if (!result.success) {
                 Utils.showToast(result.message, 'error');
                 checkAvailability();
@@ -459,12 +459,12 @@ const ReservationsModule = {
         modal.querySelector('#reservation-detail-ok').addEventListener('click', close);
     },
 
-    changeStatus(reservationId, status) {
+    async changeStatus(reservationId, status) {
         if (!AuthService.hasRole('owner')) {
             Utils.showToast('Hanya Owner yang dapat mengubah status reservasi.', 'error');
             return;
         }
-        const success = StorageService.updateReservationStatus(reservationId, status);
+        const success = await StorageService.updateReservationStatus(reservationId, status);
         if (!success) {
             Utils.showToast('Perubahan status reservasi tidak diizinkan atau gagal disimpan.', 'error');
             return;

@@ -193,8 +193,8 @@ const BillingModule = {
         `;
     },
 
-    createBill(reservationId) {
-        const result = StorageService.createBillingBill(reservationId);
+    async createBill(reservationId) {
+        const result = await StorageService.createBillingBill(reservationId);
         if (!result.success) {
             Utils.showToast(result.message, 'error');
             return;
@@ -206,7 +206,7 @@ const BillingModule = {
         );
     },
 
-    submitPayment(event, form) {
+    async submitPayment(event, form) {
         event.preventDefault();
         if (form.dataset.submitting === 'true') return;
         if (!form.reportValidity()) return;
@@ -214,7 +214,7 @@ const BillingModule = {
         const submitButton = form.querySelector('[type="submit"]');
         if (submitButton) submitButton.disabled = true;
 
-        const result = StorageService.recordManualPayment({
+        const result = await StorageService.recordManualPayment({
             billId: form.dataset.billId,
             amount: form.elements.amount.value,
             method: form.elements.method.value,

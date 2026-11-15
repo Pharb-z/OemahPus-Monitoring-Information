@@ -259,7 +259,7 @@ const PickupModule = {
                 if (choice) modal.querySelector('#pickup-address').value = choice.reservation.pickupAddress || '';
             });
         }
-        modal.querySelector('#pickup-form').addEventListener('submit', event => {
+        modal.querySelector('#pickup-form').addEventListener('submit', async event => {
             event.preventDefault();
             const scheduledTime = modal.querySelector('#pickup-scheduled-time').value;
             const assignment = {
@@ -269,22 +269,22 @@ const PickupModule = {
             };
             let result;
             try {
-                result = pickup
-                    ? StorageService.updatePickupAssignment(pickup.id, assignment)
-                    : (() => {
-                        const optionIndex = Number.parseInt(
-                            modal.querySelector('#pickup-reservation').value,
-                            10
-                        );
-                        const choice = Number.isInteger(optionIndex) ? choices[optionIndex] : null;
-                        return choice
-                            ? StorageService.createPickup({
-                                reservationId: choice.reservation.id,
-                                type: choice.type,
-                                ...assignment
-                            })
-                            : { success: false, message: 'Pilih reservasi yang valid.' };
-                    })();
+                if (pickup) {
+                    result = await StorageService.updatePickupAssignment(pickup.id, assignment);
+                } else {
+                    const optionIndex = Number.parseInt(
+                        modal.querySelector('#pickup-reservation').value,
+                        10
+                    );
+                    const choice = Number.isInteger(optionIndex) ? choices[optionIndex] : null;
+                    result = choice
+                        ? await StorageService.createPickup({
+                            reservationId: choice.reservation.id,
+                            type: choice.type,
+                            ...assignment
+                        })
+                        : { success: false, message: 'Pilih reservasi yang valid.' };
+                }
             } catch (error) {
                 if (!error || error.name !== 'StoredDataReadError') {
                     Utils.showToast('Tugas gagal disimpan karena data tidak dapat diproses.', 'error');

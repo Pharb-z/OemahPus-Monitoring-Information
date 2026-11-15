@@ -6,6 +6,34 @@
  */
 
 const DashboardModule = {
+    getReservationPickupLabel(reservation) {
+        if (!reservation || typeof reservation !== 'object' || Array.isArray(reservation)) {
+            return 'Layanan Belum Tercatat';
+        }
+        const configuration = StorageService.getReservationPickupConfiguration(reservation);
+        if (configuration.state === 'unconfigured') return 'Layanan Belum Tercatat';
+        if (configuration.state !== 'valid') return 'Layanan Belum Terverifikasi';
+
+        switch (configuration.pickupType) {
+            case 'none': return 'Tanpa Antar-Jemput';
+            case 'pickup': return 'Penjemputan';
+            case 'delivery': return 'Pengantaran Kembali';
+            case 'both': return 'Penjemputan dan Pengantaran Kembali';
+            default: return 'Layanan Belum Terverifikasi';
+        }
+    },
+
+    getDriverPickupTypeDetails(type) {
+        switch (type) {
+            case 'Penjemputan':
+                return { label: type, badgeClass: 'badge-primary' };
+            case 'Pengantaran Kembali':
+                return { label: type, badgeClass: 'badge-purple' };
+            default:
+                return { label: 'Jenis tugas tidak diketahui', badgeClass: 'badge-light' };
+        }
+    },
+
     /**
      * Render dashboard utama sesuai peran pengguna yang sedang aktif
      */
@@ -68,7 +96,7 @@ const DashboardModule = {
                 ...stay,
                 roomNumber: stay.kennel,
                 checkOutDate: stay.plannedCheckOutDate,
-                needPickup: reservation.needPickup,
+                pickupServiceLabel: this.getReservationPickupLabel(reservation),
                 paymentStatus: bill ? bill.paymentStatus : 'Belum Ditagihkan'
             };
         });
@@ -165,7 +193,7 @@ const DashboardModule = {
                                             <td><span class="badge badge-secondary">${Utils.escapeHtml(r.roomNumber || 'Kandang Standar')}</span></td>
                                             <td>${Utils.escapeHtml(r.ownerName)}</td>
                                             <td>${Utils.formatDate(r.checkInDate)} - ${Utils.formatDate(r.checkOutDate)}</td>
-                                            <td>${r.needPickup ? '<span class="badge badge-primary">Antar-Jemput</span>' : '<span class="badge badge-light">Antar Sendiri</span>'}</td>
+                                            <td>${Utils.escapeHtml(r.pickupServiceLabel)}</td>
                                             <td><span class="badge ${r.paymentStatus === 'Lunas' ? 'badge-success' : 'badge-warning'}">${Utils.escapeHtml(r.paymentStatus)}</span></td>
                                         </tr>
                                     `).join('') || `<tr><td colspan="6" class="text-center text-muted p-4">Tidak ada kucing yang sedang menginap saat ini.</td></tr>`}
@@ -200,7 +228,7 @@ const DashboardModule = {
                                             </td>
                                             <td>${Utils.formatDate(r.checkInDate)} s/d ${Utils.formatDate(r.checkOutDate)}</td>
                                             <td>${Utils.formatRupiah((r.estimatedCost || 0) + (r.pickupCost || 0))}</td>
-                                            <td>${r.needPickup ? '<span class="badge badge-info">Butuh Jemput</span>' : '<span class="badge badge-light">Tidak</span>'}</td>
+                                            <td>${Utils.escapeHtml(this.getReservationPickupLabel(r))}</td>
                                             <td>
                                                 <button class="btn btn-primary btn-sm btn-quick-confirm" data-id="${r.id}">
                                                     ✓ Konfirmasi
@@ -432,7 +460,7 @@ const DashboardModule = {
                                     <td><strong>🐱 ${Utils.escapeHtml(r.catName)}</strong> (${Utils.escapeHtml(r.ownerName)})</td>
                                     <td><strong>${Utils.formatDate(r.checkInDate)}</strong></td>
                                     <td>${Utils.formatDate(r.checkOutDate)}</td>
-                                    <td>${r.needPickup ? '<span class="badge badge-primary">Ya (Driver)</span>' : '<span class="badge badge-light">Mandiri</span>'}</td>
+                                    <td>${Utils.escapeHtml(this.getReservationPickupLabel(r))}</td>
                                 </tr>
                             `).join('')}
                             ${activeStays.map(r => `
@@ -441,7 +469,7 @@ const DashboardModule = {
                                     <td><strong>🐱 ${Utils.escapeHtml(r.catName)}</strong> (${Utils.escapeHtml(r.ownerName)})</td>
                                     <td>${Utils.formatDate(r.checkInDate)}</td>
                                     <td><strong>Rencana Check-Out: ${Utils.formatDate(r.checkOutDate)}</strong></td>
-                                    <td>${r.needPickup ? '<span class="badge badge-primary">Antar Kembali</span>' : '<span class="badge badge-light">Diambil Sendiri</span>'}</td>
+                                    <td>${Utils.escapeHtml(r.pickupServiceLabel)}</td>
                                 </tr>
                             `).join('')}
                         </tbody>
@@ -458,7 +486,7 @@ const DashboardModule = {
      */
     renderDriverDashboard(user) {
         const pickups = StorageService.getPickups();
-        const pendingPickups = pickups.filter(p => p.status !== 'Selesai');
+        const pendingPickups = pickups.filter(p => p.status === 'Terjadwal');
         const completedPickups = pickups.filter(p => p.status === 'Selesai');
 
         return `
@@ -505,10 +533,48 @@ const DashboardModule = {
             </div>
 
             <!-- Tabel Daftar Tugas Antar Jemput Lengkap (Dengan Aksi Cepat Update Status) -->
+            ${this.renderDriverPickupTable(pickups)}
+        `;
+    },
+
+    renderDriverSchedule(user) {
+        const activeUser = AuthService.getCurrentUser();
+        const contentContainer = document.getElementById('main-content-container');
+        if (!contentContainer || !user || !activeUser ||
+            activeUser.id !== user.id || activeUser.role !== 'staff_driver') {
+            Utils.showToast('Anda tidak memiliki izin melihat jadwal antar-jemput.', 'error');
+            if (contentContainer) contentContainer.innerHTML = '';
+            return;
+        }
+
+        const pickups = StorageService.getPickups();
+        contentContainer.innerHTML = `
+            <div class="dashboard-header mb-4">
+                <div class="welcome-banner">
+                    <div>
+                        <h2 class="title-lg">Jadwal Antar-Jemput</h2>
+                        <p class="subtitle">Tugas yang ditugaskan kepada ${Utils.escapeHtml(user.name)}.</p>
+                    </div>
+                    <button type="button" class="btn btn-outline" id="btn-driver-schedule-back">
+                        Kembali ke Dashboard
+                    </button>
+                </div>
+            </div>
+            ${this.renderDriverPickupTable(pickups)}
+        `;
+
+        contentContainer.querySelector('#btn-driver-schedule-back').addEventListener('click', () => {
+            App.navigateTo('dashboard');
+        });
+        this.bindDashboardActions(contentContainer, user);
+    },
+
+    renderDriverPickupTable(pickups) {
+        return `
             <div class="card mb-4">
                 <div class="card-header flex-between">
                     <h3 class="card-title">Jadwal Penugasan Antar-Jemput Kucing</h3>
-                    <span class="badge badge-info">${pendingPickups.length} Tugas Perlu Diproses</span>
+                    <span class="badge badge-info">${pickups.filter(p => p.status === 'Terjadwal').length} Tugas Perlu Diproses</span>
                 </div>
                 <div class="table-responsive">
                     <table class="data-table">
@@ -524,37 +590,45 @@ const DashboardModule = {
                             </tr>
                         </thead>
                         <tbody>
-                            ${pickups.map(p => `
-                                <tr>
-                                    <td>
-                                        <span class="badge ${p.type.includes('Jemput') ? 'badge-primary' : 'badge-purple'}">
-                                            ${Utils.escapeHtml(p.type)}
-                                        </span><br>
-                                        <small class="text-muted">${Utils.escapeHtml(p.id)}</small>
-                                    </td>
-                                    <td><strong>🐱 ${Utils.escapeHtml(p.catName)}</strong></td>
-                                    <td>
-                                        <strong>${Utils.escapeHtml(p.ownerName)}</strong><br>
-                                        <small class="text-muted">📞 ${Utils.escapeHtml(p.phone)}</small>
-                                    </td>
-                                    <td><small>${Utils.escapeHtml(p.address)}</small></td>
-                                    <td><strong>${Utils.escapeHtml(p.scheduledTime)}</strong></td>
-                                    <td>
-                                        <span class="badge ${p.status === 'Selesai' ? 'badge-success' : 'badge-warning'}">
-                                            ${Utils.escapeHtml(p.status)}
-                                        </span>
-                                    </td>
-                                    <td>
-                                        ${p.status !== 'Selesai' ? `
-                                            <button class="btn btn-primary btn-sm btn-update-pickup" data-id="${p.id}" data-status="Selesai">
-                                                ✓ Tandai Selesai
-                                            </button>
-                                        ` : `
-                                            <span class="text-muted" style="font-size: 0.8rem;">✓ Tuntas</span>
-                                        `}
-                                    </td>
-                                </tr>
-                            `).join('') || `<tr><td colspan="7" class="text-center text-muted p-4">Tidak ada tugas penjemputan saat ini.</td></tr>`}
+                            ${pickups.map(p => {
+                                const type = this.getDriverPickupTypeDetails(p.type);
+                                const status = p.status === 'Terjadwal' || p.status === 'Selesai'
+                                    ? p.status
+                                    : 'Status tidak diketahui';
+                                const canComplete = p.status === 'Terjadwal' && typeof p.id === 'string' && p.id;
+                                return `
+                                    <tr>
+                                        <td>
+                                            <span class="badge ${type.badgeClass}">
+                                                ${Utils.escapeHtml(type.label)}
+                                            </span><br>
+                                            <small class="text-muted">${Utils.escapeHtml(typeof p.id === 'string' && p.id ? p.id : '-')}</small>
+                                        </td>
+                                        <td><strong>🐱 ${Utils.escapeHtml(typeof p.catName === 'string' && p.catName ? p.catName : '-')}</strong></td>
+                                        <td>
+                                            <strong>${Utils.escapeHtml(typeof p.ownerName === 'string' && p.ownerName ? p.ownerName : '-')}</strong><br>
+                                            <small class="text-muted">📞 ${Utils.escapeHtml(typeof p.phone === 'string' ? p.phone : '-')}</small>
+                                        </td>
+                                        <td><small>${Utils.escapeHtml(typeof p.address === 'string' && p.address ? p.address : '-')}</small></td>
+                                        <td><strong>${Utils.escapeHtml(typeof p.scheduledTime === 'string' && p.scheduledTime ? p.scheduledTime : '-')}</strong></td>
+                                        <td>
+                                            <span class="badge ${status === 'Selesai' ? 'badge-success' : status === 'Terjadwal' ? 'badge-warning' : 'badge-light'}">
+                                                ${Utils.escapeHtml(status)}
+                                            </span>
+                                        </td>
+                                        <td>
+                                            ${canComplete ? `
+                                                <button type="button" class="btn btn-primary btn-sm btn-update-pickup"
+                                                    data-id="${Utils.escapeHtml(p.id)}" data-status="Selesai">
+                                                    ✓ Tandai Selesai
+                                                </button>
+                                            ` : status === 'Selesai' ? `
+                                                <span class="text-muted" style="font-size: 0.8rem;">✓ Tuntas</span>
+                                            ` : '<span class="text-muted">-</span>'}
+                                        </td>
+                                    </tr>
+                                `;
+                            }).join('') || `<tr><td colspan="7" class="text-center text-muted p-4">Tidak ada tugas antar-jemput saat ini.</td></tr>`}
                         </tbody>
                     </table>
                 </div>
@@ -600,7 +674,7 @@ const DashboardModule = {
             roomNumber: activeStayRecord.kennel,
             checkInDate: activeStayRecord.checkInDate,
             checkOutDate: activeStayRecord.plannedCheckOutDate,
-            needPickup: activeReservation && activeReservation.needPickup,
+            pickupServiceLabel: this.getReservationPickupLabel(activeReservation),
             paymentStatus: activeStayBill ? activeStayBill.paymentStatus : 'Belum Ditagihkan'
         } : null;
 
@@ -675,7 +749,7 @@ const DashboardModule = {
                             </div>
                             <div class="stay-detail">
                                 <span class="label">Fasilitas Antar-Jemput:</span>
-                                <span class="value">${activeStay.needPickup ? 'Aktif (Dijemput/Diantar Driver)' : 'Diantar Mandiri'}</span>
+                                <span class="value">${Utils.escapeHtml(activeStay.pickupServiceLabel)}</span>
                             </div>
                             <div class="stay-detail">
                                 <span class="label">Status Pembayaran:</span>
@@ -751,7 +825,7 @@ const DashboardModule = {
                                     <td><strong>${Utils.escapeHtml(r.id)}</strong></td>
                                     <td><strong>🐱 ${Utils.escapeHtml(r.catName)}</strong></td>
                                     <td>${Utils.formatDate(r.checkInDate)} s/d ${Utils.formatDate(r.checkOutDate)}</td>
-                                    <td>${r.needPickup ? '<span class="badge badge-primary">Antar-Jemput</span>' : '<span class="badge badge-light">Mandiri</span>'}</td>
+                                    <td>${Utils.escapeHtml(this.getReservationPickupLabel(r))}</td>
                                     <td>${billingByReservationId.has(r.id)
                                         ? Utils.formatRupiah(billingByReservationId.get(r.id).totalAmount)
                                         : '<span class="text-muted">Belum ditagihkan</span>'}</td>
@@ -807,13 +881,15 @@ const DashboardModule = {
     bindDashboardActions(containerElement, user) {
         // 1. Aksi Konfirmasi Reservasi Cepat oleh Owner
         containerElement.querySelectorAll('.btn-quick-confirm').forEach(btn => {
-            btn.addEventListener('click', (e) => {
+            btn.addEventListener('click', async (e) => {
                 if (!AuthService.hasRole('owner')) {
                     Utils.showToast('Hanya Owner yang dapat mengonfirmasi reservasi.', 'error');
                     return;
                 }
                 const resId = btn.getAttribute('data-id');
-                if (!StorageService.updateReservationStatus(resId, 'Dikonfirmasi')) {
+                btn.disabled = true;
+                if (!await StorageService.updateReservationStatus(resId, 'Dikonfirmasi')) {
+                    btn.disabled = false;
                     Utils.showToast('Reservasi tidak dapat diperbarui.', 'error');
                     return;
                 }
@@ -825,14 +901,16 @@ const DashboardModule = {
 
         // 2. Aksi Tandai Selesai Tugas Antar-Jemput oleh Driver
         containerElement.querySelectorAll('.btn-update-pickup').forEach(btn => {
-            btn.addEventListener('click', (e) => {
+            btn.addEventListener('click', async (e) => {
                 if (!AuthService.hasRole('staff_driver')) {
                     Utils.showToast('Hanya staf antar-jemput yang dapat memperbarui tugas.', 'error');
                     return;
                 }
                 const pickupId = btn.getAttribute('data-id');
                 const newStatus = btn.getAttribute('data-status') || 'Selesai';
-                if (!StorageService.updatePickupStatus(pickupId, newStatus)) {
+                btn.disabled = true;
+                if (!await StorageService.updatePickupStatus(pickupId, newStatus)) {
+                    btn.disabled = false;
                     Utils.showToast('Tugas tidak ditemukan atau bukan penugasan Anda.', 'error');
                     return;
                 }

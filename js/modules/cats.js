@@ -276,12 +276,14 @@ const CatsModule = {
 
         // 8. Hapus Kucing
         containerElement.querySelectorAll('.btn-delete-cat').forEach(btn => {
-            btn.addEventListener('click', () => {
+            btn.addEventListener('click', async () => {
                 const catId = btn.getAttribute('data-id');
                 const cat = StorageService.getCatById(catId);
                 if (cat && confirm(`Apakah Anda yakin ingin menghapus data kucing "${cat.name}"?`)) {
-                    const result = StorageService.deleteCat(catId);
+                    btn.disabled = true;
+                    const result = await StorageService.deleteCat(catId);
                     if (!result.success) {
+                        btn.disabled = false;
                         Utils.showToast(result.message, 'error');
                         return;
                     }
@@ -438,7 +440,7 @@ const CatsModule = {
         document.getElementById('modal-cancel-btn').addEventListener('click', closeModal);
 
         // Submit form dengan validasi numerik ketat
-        document.getElementById('cat-form').addEventListener('submit', (e) => {
+        document.getElementById('cat-form').addEventListener('submit', async (e) => {
             e.preventDefault();
 
             const name = document.getElementById('form-cat-name').value.trim();
@@ -513,7 +515,7 @@ const CatsModule = {
                 }
             };
 
-            const result = StorageService.saveCat(catPayload);
+            const result = await StorageService.saveCat(catPayload);
             if (result.success) {
                 Utils.showToast(`Data kucing "${name}" berhasil ${isEdit ? 'diperbarui' : 'ditambahkan'}!`, 'success');
                 closeModal();

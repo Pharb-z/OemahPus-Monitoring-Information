@@ -209,6 +209,42 @@
     color: var(--text-light);
 }
 
+/* Kolom kata sandi dengan tombol tampilkan/sembunyikan */
+.password-field {
+    position: relative;
+}
+
+.password-field .form-control {
+    padding-right: 2.75rem;
+}
+
+.password-toggle {
+    position: absolute;
+    top: 50%;
+    right: 0.5rem;
+    transform: translateY(-50%);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    font-size: 1rem;
+    line-height: 1;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.password-toggle:hover,
+.password-toggle:focus-visible {
+    color: var(--text-main);
+    background-color: rgba(0, 0, 0, 0.05);
+    outline: none;
+}
+
 .form-helper {
     font-size: 0.75rem;
     color: var(--text-muted);

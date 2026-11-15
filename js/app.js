@@ -4,8 +4,8 @@
  * Deskripsi: Pengendali utama alur aplikasi (Autentikasi, Navigasi Dinamis, dan State App)
  */
 
-document.addEventListener('DOMContentLoaded', () => {
-    App.init();
+document.addEventListener('DOMContentLoaded', async () => {
+    await App.init();
 });
 
 const App = {
@@ -14,7 +14,7 @@ const App = {
     /**
      * Inisialisasi awal aplikasi
      */
-    init() {
+    async init() {
         if (!StorageService.isReady()) {
             Utils.showToast(
                 StorageService.getInitializationError() || 'Data OMI belum siap. Muat ulang aplikasi untuk mencoba kembali.',
@@ -23,7 +23,15 @@ const App = {
             return;
         }
 
-        // Periksa apakah sudah ada sesi aktif di sessionStorage
+        // Pulihkan sesi dari token tersimpan (jika ada) sebelum menampilkan UI
+        await AuthService.restoreSession();
+
+        // Selaraskan mirror data dari server untuk pengguna yang sudah masuk
+        if (AuthService.isLoggedIn()) {
+            await StorageService.loadFromServer();
+        }
+
+        // Periksa status login dan atur tampilan awal
         this.checkAuthState();
 
         // Daftarkan event listener untuk form login & registrasi
@@ -223,6 +231,8 @@ const App = {
             BoardingModule.render(contentContainer, this.currentUser, 'reports');
         } else if (moduleId === 'payments' || moduleId === 'my-billing') {
             BillingModule.render(contentContainer, this.currentUser);
+        } else if (moduleId === 'pickup' && this.currentUser.role === 'staff_driver') {
+            DashboardModule.renderDriverSchedule(this.currentUser);
         } else if (moduleId === 'pickup' && ['owner', 'staff_ops'].includes(this.currentUser.role)) {
             PickupModule.render(contentContainer, this.currentUser);
         } else {
@@ -240,6 +250,9 @@ const App = {
                 </div>
             `;
         }
+        document.querySelectorAll('#sidebar-menu-list .nav-link').forEach(link => {
+            link.classList.toggle('active', link.getAttribute('data-nav') === moduleId);
+        });
         return true;
     },
 
@@ -258,32 +271,26 @@ const App = {
             tabRegisterBtn.addEventListener('click', () => this.switchAuthTab('register'));
         }
 
-        // 2. Quick Demo Login Buttons
-        const demoButtons = document.querySelectorAll('.btn-demo');
-        demoButtons.forEach(btn => {
-            btn.addEventListener('click', () => {
-                const role = btn.getAttribute('data-role');
-                const result = AuthService.loginAsDemo(role);
-                if (result.success) {
-                    Utils.showToast(result.message, 'success');
-                    this.checkAuthState();
-                } else {
-                    Utils.showToast(result.message, 'error');
-                }
-            });
-        });
-
-        // 3. Form Login Submit
+        // 2. Form Login Submit
         const loginForm = document.getElementById('form-login');
         if (loginForm) {
-            loginForm.addEventListener('submit', (e) => {
+            loginForm.addEventListener('submit', async (e) => {
                 e.preventDefault();
-                const emailInput = document.getElementById('login-email');
+                const identifierInput = document.getElementById('login-email');
                 const passInput = document.getElementById('login-password');
+                const submitBtn = loginForm.querySelector('[type="submit"]');
+                if (submitBtn) submitBtn.disabled = true;
 
-                const result = AuthService.loginWithEmail(emailInput.value, passInput ? passInput.value : '');
+                const result = await AuthService.login(
+                    identifierInput ? identifierInput.value : '',
+                    passInput ? passInput.value : ''
+                );
+                if (submitBtn) submitBtn.disabled = false;
+
                 if (result.success) {
                     Utils.showToast(result.message, 'success');
+                    if (passInput) passInput.value = '';
+                    await StorageService.loadFromServer();
                     this.checkAuthState();
                 } else {
                     Utils.showToast(result.message, 'error');
@@ -291,26 +298,32 @@ const App = {
             });
         }
 
-        // 4. Form Registrasi Customer Submit (Ketat: hanya Customer)
+        // 3. Form Registrasi Customer Submit (Ketat: hanya Customer)
         const registerForm = document.getElementById('form-register');
         if (registerForm) {
-            registerForm.addEventListener('submit', (e) => {
+            registerForm.addEventListener('submit', async (e) => {
                 e.preventDefault();
                 const nameInput = document.getElementById('reg-name');
                 const emailInput = document.getElementById('reg-email');
                 const phoneInput = document.getElementById('reg-phone');
                 const addressInput = document.getElementById('reg-address');
+                const passwordInput = document.getElementById('reg-password');
+                const submitBtn = registerForm.querySelector('[type="submit"]');
+                if (submitBtn) submitBtn.disabled = true;
 
-                const result = AuthService.registerCustomer({
+                const result = await AuthService.registerCustomer({
                     name: nameInput ? nameInput.value : '',
                     email: emailInput ? emailInput.value : '',
                     phone: phoneInput ? phoneInput.value : '',
-                    address: addressInput ? addressInput.value : ''
+                    address: addressInput ? addressInput.value : '',
+                    password: passwordInput ? passwordInput.value : ''
                 });
+                if (submitBtn) submitBtn.disabled = false;
 
                 if (result.success) {
                     Utils.showToast(result.message, 'success');
                     registerForm.reset();
+                    await StorageService.loadFromServer();
                     this.checkAuthState();
                 } else {
                     Utils.showToast(result.message, 'error');
@@ -318,17 +331,30 @@ const App = {
             });
         }
 
-        // 5. Logout Button
+        // 4. Logout Button
         const logoutBtn = document.getElementById('btn-logout');
         if (logoutBtn) {
-            logoutBtn.addEventListener('click', (e) => {
+            logoutBtn.addEventListener('click', async (e) => {
                 e.preventDefault();
-                AuthService.logout();
+                await AuthService.logout();
                 this.currentUser = null;
                 Utils.showToast('Anda telah keluar dari aplikasi.', 'info');
                 this.checkAuthState();
             });
         }
+
+        // 5. Tampilkan / sembunyikan kata sandi (login & registrasi)
+        document.querySelectorAll('.password-toggle').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const input = document.getElementById(btn.getAttribute('data-target'));
+                if (!input) return;
+                const show = input.type === 'password';
+                input.type = show ? 'text' : 'password';
+                btn.textContent = show ? '🙈' : '👁';
+                btn.setAttribute('aria-pressed', String(show));
+                btn.setAttribute('aria-label', show ? 'Sembunyikan kata sandi' : 'Tampilkan kata sandi');
+            });
+        });
     },
 
     /**

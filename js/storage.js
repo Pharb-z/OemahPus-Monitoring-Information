@@ -965,6 +965,54 @@ const StorageService = {
         return readStoredData(StorageKeys.USERS).filter(u => u.role === 'customer');
     },
     getCats() { return this.get(StorageKeys.CATS); },
+
+    /**
+     * Fase 2: selaraskan mirror LocalStorage dari server (sumber kebenaran).
+     * Server tidak pernah dipanggil pada pembacaan; fungsi ini mengisi ulang
+     * cermin agar getCats()/getCustomers() sinkron tetap berisi data terkini.
+     */
+    async loadFromServer() {
+        if (typeof AppApi === 'undefined') return { success: false, message: 'API tidak tersedia.' };
+        try {
+            const catsData = await AppApi.request('/cats');
+            writeStoredData(StorageKeys.CATS, catsData.cats || []);
+
+            const reservationsData = await AppApi.request('/reservations');
+            writeStoredData(StorageKeys.RESERVATIONS, reservationsData.reservations || []);
+
+            const staysData = await AppApi.request('/boarding-stays');
+            writeStoredData(StorageKeys.BOARDING_STAYS, staysData.stays || []);
+
+            const reportsData = await AppApi.request('/daily-reports');
+            writeStoredData(StorageKeys.DAILY_REPORTS, reportsData.reports || []);
+
+            const pickupsData = await AppApi.request('/pickups');
+            writeStoredData(StorageKeys.PICKUPS, pickupsData.pickups || []);
+
+            const billsData = await AppApi.request('/bills');
+            writeStoredData(StorageKeys.BILLING_BILLS, billsData.bills || []);
+
+            const transactionsData = await AppApi.request('/billing-transactions');
+            writeStoredData(StorageKeys.BILLING_TRANSACTIONS, transactionsData.transactions || []);
+
+            const settingsData = await AppApi.request('/settings');
+            if (settingsData.settings) writeStoredData(StorageKeys.SETTINGS, settingsData.settings);
+
+            const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
+            if (user && ['owner', 'staff_ops'].includes(user.role)) {
+                const usersData = await AppApi.request('/customers');
+                const customers = usersData.users || [];
+                const existing = readStoredData(StorageKeys.USERS);
+                const nonCustomers = existing.filter(item => item.role !== 'customer');
+                writeStoredData(StorageKeys.USERS, [...nonCustomers, ...customers]);
+            }
+            return { success: true };
+        } catch (error) {
+            console.error('Gagal menyelaraskan data dari server:', error);
+            return { success: false, message: error.message };
+        }
+    },
+
     getReservations() { return this.get(StorageKeys.RESERVATIONS); },
     getReservationPickupConfiguration(reservation) {
         return inspectReservationPickupConfiguration(reservation);
@@ -1141,7 +1189,7 @@ const StorageService = {
             transactions: visibleTransactions.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))
         };
     },
-    createBillingBill(reservationId) {
+    async createBillingBill(reservationId) {
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
         if (!user || user.role !== 'staff_ops') {
             return { success: false, message: 'Hanya Staf Operasional yang dapat menyiapkan tagihan.' };
@@ -1246,41 +1294,25 @@ const StorageService = {
             return { success: false, message: 'Periode atau total tagihan tidak dapat dihitung dengan aman.' };
         }
 
-        const billsResult = readBillingCollection(StorageKeys.BILLING_BILLS);
-        if (!billsResult.success) return { success: false, message: 'Data tagihan tidak dapat dibaca.' };
-        if (billsResult.value.some(bill => bill.reservationId === reservationId)) {
-            return { success: false, message: 'Tagihan untuk reservasi ini sudah tersedia.' };
+        try {
+            const data = await AppApi.request('/bills', {
+                method: 'POST',
+                body: { reservationId: reservation.id }
+            });
+            const mirror = readBillingCollection(StorageKeys.BILLING_BILLS);
+            const bills = mirror.success ? mirror.value : [];
+            bills.push(data.bill);
+            writeStoredData(StorageKeys.BILLING_BILLS, bills);
+            return { success: true, bill: data.bill };
+        } catch (error) {
+            return { success: false, message: error.message || 'Gagal menyimpan tagihan.' };
         }
-        const bill = {
-            id: this.generateUniqueRecordId('BILL', billsResult.value),
-            reservationId: reservation.id,
-            customerId: customer.id,
-            customerName: customer.name,
-            catId: cat.id,
-            catName: cat.name,
-            boardingStayId: stay ? stay.id : null,
-            currency: 'IDR',
-            periodStart: reservation.checkInDate,
-            periodEndExclusive: reservation.checkOutDate,
-            numberOfNights,
-            unitRate,
-            lineItems: [{
-                description: `Penitipan kucing (${numberOfNights} malam)`,
-                quantity: numberOfNights,
-                unitRate,
-                amount: totalAmount
-            }],
-            totalAmount,
-            createdAt: new Date().toISOString(),
-            createdBy: { id: user.id, name: user.name }
-        };
-        billsResult.value.push(bill);
-        if (!writeStoredData(StorageKeys.BILLING_BILLS, billsResult.value)) {
-            return { success: false, message: 'Tagihan gagal disimpan. Periksa ruang penyimpanan browser.' };
-        }
-        return { success: true, bill };
     },
-    recordManualPayment(paymentData = {}) {
+
+    /**
+     * Fase 6: catat pembayaran manual melalui API server.
+     */
+    async recordManualPayment(paymentData = {}) {
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
         if (!user || user.role !== 'staff_ops') {
             return { success: false, message: 'Hanya Staf Operasional yang dapat mencatat pembayaran.' };
@@ -1310,42 +1342,25 @@ const StorageService = {
             return { success: false, message: 'Catatan atau referensi pembayaran maksimal 120 karakter.' };
         }
 
-        const overview = this.getBillingOverview();
-        if (!overview.success) return overview;
-        if (overview.transactions.some(item => item.idempotencyKey === idempotencyKey)) {
-            return { success: false, message: 'Pengiriman ini sudah pernah dicatat.' };
+        try {
+            const data = await AppApi.request('/billing-transactions', {
+                method: 'POST',
+                body: {
+                    billId: paymentData.billId,
+                    amount,
+                    method: paymentData.method,
+                    reference,
+                    idempotencyKey
+                }
+            });
+            const mirror = readBillingCollection(StorageKeys.BILLING_TRANSACTIONS);
+            const transactions = mirror.success ? mirror.value : [];
+            transactions.push(data.transaction);
+            writeStoredData(StorageKeys.BILLING_TRANSACTIONS, transactions);
+            return { success: true, transaction: data.transaction };
+        } catch (error) {
+            return { success: false, message: error.message || 'Pembayaran gagal disimpan.' };
         }
-        const bill = overview.bills.find(item => item.id === paymentData.billId);
-        if (!bill) return { success: false, message: 'Tagihan tidak ditemukan atau tidak valid.' };
-        if (amount > bill.remainingAmount) {
-            return { success: false, message: 'Nominal pembayaran melebihi sisa tagihan.' };
-        }
-
-        const transactionsResult = readBillingCollection(StorageKeys.BILLING_TRANSACTIONS);
-        if (!transactionsResult.success) {
-            return { success: false, message: 'Data transaksi tidak dapat dibaca.' };
-        }
-        if (transactionsResult.value.some(item => item.idempotencyKey === idempotencyKey)) {
-            return { success: false, message: 'Pengiriman ini sudah pernah dicatat.' };
-        }
-        const transaction = {
-            id: this.generateUniqueRecordId('PAY', transactionsResult.value),
-            billId: bill.id,
-            reservationId: bill.reservationId,
-            customerId: bill.customerId,
-            amount,
-            method: paymentData.method,
-            status: 'Diterima',
-            recordedAt: new Date().toISOString(),
-            recordedBy: { id: user.id, name: user.name },
-            reference,
-            idempotencyKey
-        };
-        transactionsResult.value.push(transaction);
-        if (!writeStoredData(StorageKeys.BILLING_TRANSACTIONS, transactionsResult.value)) {
-            return { success: false, message: 'Pembayaran gagal disimpan. Tidak ada status lunas yang diperbarui.' };
-        }
-        return { success: true, transaction };
     },
     isValidIsoDate(value) {
         if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -1408,7 +1423,7 @@ const StorageService = {
                 return { ...reservation, occupancyStart, occupancyEnd };
             });
     },
-    checkInReservation(request = {}) {
+    async checkInReservation(request = {}) {
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
         if (!user || !['owner', 'staff_ops'].includes(user.role)) {
             return { success: false, message: 'Anda tidak memiliki izin melakukan check-in.' };
@@ -1469,28 +1484,19 @@ const StorageService = {
         });
         if (!availability.available) return { success: false, message: availability.message };
 
-        const stays = staysResult.value;
-        const stay = {
-            id: this.generateUniqueRecordId('STAY', stays),
-            reservationId: reservation.id,
-            catId: cat.id,
-            catName: cat.name,
-            ownerId: cat.ownerId,
-            ownerName: reservation.ownerName,
-            kennel: cleanKennel,
-            checkInDate: today,
-            plannedCheckOutDate: reservation.checkOutDate,
-            checkedInAt: new Date().toISOString(),
-            checkedOutAt: null,
-            actualCheckOutDate: null,
-            status: 'Sedang Dititipkan',
-            createdBy: user.id
-        };
-        stays.push(stay);
-        if (!writeStoredData(StorageKeys.BOARDING_STAYS, stays)) {
-            return { success: false, message: 'Gagal menyimpan check-in. Periksa ruang penyimpanan browser.' };
+        try {
+            const data = await AppApi.request('/boarding-stays', {
+                method: 'POST',
+                body: { reservationId: reservation.id, kennel: cleanKennel }
+            });
+            const staysResult2 = readStoredCollection(StorageKeys.BOARDING_STAYS);
+            const stays = staysResult2.success ? staysResult2.value : [];
+            stays.push(data.stay);
+            writeStoredData(StorageKeys.BOARDING_STAYS, stays);
+            return { success: true, stay: data.stay };
+        } catch (error) {
+            return { success: false, message: error.message || 'Gagal menyimpan check-in.' };
         }
-        return { success: true, stay };
     },
     isValidKennelIdentifier(value) {
         return typeof value === 'string' &&
@@ -1498,7 +1504,10 @@ const StorageService = {
             value.length <= 60 &&
             /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/.test(value);
     },
-    checkOutBoardingStay(stayId) {
+    /**
+     * Fase 4: check-out aktual melalui API server, lalu perbarui cermin lokal.
+     */
+    async checkOutBoardingStay(stayId) {
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
         if (!user || !['owner', 'staff_ops'].includes(user.role)) {
             return { success: false, message: 'Anda tidak memiliki izin melakukan check-out.' };
@@ -1507,24 +1516,25 @@ const StorageService = {
         if (!staysResult.success || !staysResult.value.every(isStoredRecord)) {
             return { success: false, message: 'Data penitipan tidak dapat dibaca; check-out tidak disimpan.' };
         }
-        const stays = staysResult.value;
-        const index = stays.findIndex(stay => stay.id === stayId);
-        if (index < 0 || stays[index].status !== 'Sedang Dititipkan') {
+        const current = staysResult.value.find(stay => stay.id === stayId);
+        if (!current || current.status !== 'Sedang Dititipkan') {
             return { success: false, message: 'Hanya kucing yang sedang dititipkan dapat menjalani check-out.' };
         }
-        const checkedOutAt = new Date();
-        stays[index] = {
-            ...stays[index],
-            status: 'Selesai',
-            checkedOutAt: checkedOutAt.toISOString(),
-            actualCheckOutDate: this.getLocalDateString(checkedOutAt)
-        };
-        if (!writeStoredData(StorageKeys.BOARDING_STAYS, stays)) {
-            return { success: false, message: 'Gagal menyimpan check-out. Periksa ruang penyimpanan browser.' };
+
+        try {
+            const data = await AppApi.request(`/boarding-stays/${encodeURIComponent(stayId)}/checkout`, {
+                method: 'PUT'
+            });
+            const stays = staysResult.value;
+            const index = stays.findIndex(stay => stay.id === stayId);
+            if (index >= 0) stays[index] = data.stay;
+            writeStoredData(StorageKeys.BOARDING_STAYS, stays);
+            return { success: true, stay: data.stay };
+        } catch (error) {
+            return { success: false, message: error.message || 'Gagal menyimpan check-out.' };
         }
-        return { success: true, stay: stays[index] };
     },
-    saveDailyReport(reportData = {}) {
+    async saveDailyReport(reportData = {}) {
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
         if (!user || !['owner', 'staff_ops'].includes(user.role)) {
             return { success: false, message: 'Anda tidak memiliki izin menyimpan laporan harian.' };
@@ -1576,39 +1586,31 @@ const StorageService = {
         }
 
         const reports = reportsResult.value;
-        const index = reportData.id ? reports.findIndex(report => report.id === reportData.id) : -1;
-        const existing = index >= 0 ? reports[index] : null;
+        const existing = reportData.id
+            ? reports.find(report => report.id === reportData.id)
+            : null;
         if (reportData.id && !existing) return { success: false, message: 'Laporan harian tidak ditemukan.' };
         if (existing && (existing.boardingStayId !== stay.id ||
             existing.catId !== stay.catId || existing.reservationId !== stay.reservationId)) {
             return { success: false, message: 'Laporan tidak terhubung dengan penitipan ini.' };
         }
-        if (reports.some(report =>
-            report.id !== reportData.id && report.catId === stay.catId && report.date === reportData.date
-        )) {
-            return { success: false, message: 'Laporan untuk kucing ini pada tanggal tersebut sudah ada. Gunakan fitur edit.' };
-        }
 
-        const report = {
-            ...(existing || {}),
-            ...values,
-            id: existing ? existing.id : this.generateUniqueRecordId('REP', reports),
-            boardingStayId: stay.id,
-            reservationId: stay.reservationId,
-            catId: stay.catId,
-            catName: stay.catName,
-            date: reportData.date,
-            recordedBy: existing ? existing.recordedBy : user.name,
-            recordedAt: existing ? existing.recordedAt : new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            updatedBy: user.id
-        };
-        if (existing) reports[index] = report;
-        else reports.push(report);
-        if (!writeStoredData(StorageKeys.DAILY_REPORTS, reports)) {
-            return { success: false, message: 'Gagal menyimpan laporan harian. Periksa ruang penyimpanan browser.' };
+        try {
+            const data = await AppApi.request(
+                existing ? `/daily-reports/${encodeURIComponent(existing.id)}` : '/daily-reports',
+                {
+                    method: existing ? 'PUT' : 'POST',
+                    body: { boardingStayId: stay.id, date: reportData.date, ...values }
+                }
+            );
+            const index = reports.findIndex(report => report.id === data.report.id);
+            if (index >= 0) reports[index] = data.report;
+            else reports.push(data.report);
+            writeStoredData(StorageKeys.DAILY_REPORTS, reports);
+            return { success: true, report: data.report, isNew: !existing };
+        } catch (error) {
+            return { success: false, message: error.message || 'Gagal menyimpan laporan harian.' };
         }
-        return { success: true, report, isNew: !existing };
     },
     checkReservationAvailability(request = {}) {
         const { catId, checkInDate, checkOutDate, reservationId = null } = request;
@@ -1676,7 +1678,12 @@ const StorageService = {
 
         return { available: true, message: 'Kapasitas tersedia.', capacity };
     },
-    saveReservation(reservationData) {
+    /**
+     * Fase 3: simpan reservasi melalui API server, lalu perbarui cermin lokal.
+     * Validasi benturan/kapasitas tetap di klien (data penitipan & pengaturan
+     * belum dimigrasi); server menyimpan permanen dan memvalidasi dasar.
+     */
+    async saveReservation(reservationData) {
         if (!reservationData || typeof reservationData !== 'object') {
             return { success: false, message: 'Data reservasi tidak valid.' };
         }
@@ -1711,31 +1718,13 @@ const StorageService = {
             return { success: false, message: 'Anda tidak memiliki izin menyimpan reservasi.' };
         }
 
-        const reservationsResult = readStoredCollection(StorageKeys.RESERVATIONS);
-        const catsResult = readStoredCollection(StorageKeys.CATS);
-        const staysResult = readStoredCollection(StorageKeys.BOARDING_STAYS);
-        const usersResult = readStoredCollection(StorageKeys.USERS);
-        if (!reservationsResult.success || !catsResult.success ||
-            !staysResult.success || !usersResult.success) {
-            return { success: false, message: 'Data reservasi, kucing, penitipan, atau pengguna tidak dapat dibaca; reservasi tidak disimpan.' };
-        }
-        if (![reservationsResult, catsResult, staysResult, usersResult]
-            .every(result => result.value.every(isStoredRecord))) {
-            return { success: false, message: 'Struktur data reservasi, kucing, penitipan, atau pengguna tidak valid.' };
-        }
-
-        const reservations = reservationsResult.value;
-        const cats = catsResult.value;
-        const stays = staysResult.value;
-        const users = usersResult.value;
-        const index = reservationData.id
-            ? reservations.findIndex(reservation => reservation.id === reservationData.id)
-            : -1;
-        const existingReservation = index >= 0 ? reservations[index] : null;
+        const existingReservation = reservationData.id
+            ? this.getReservationById(reservationData.id)
+            : null;
         if (reservationData.id && !existingReservation) {
             return { success: false, message: 'Reservasi tidak ditemukan.' };
         }
-        if (user.role === 'customer' && existingReservation) {
+        if (existingReservation && user.role === 'customer') {
             return { success: false, message: 'Pemilik kucing hanya dapat membuat dan melihat reservasi.' };
         }
         if (existingReservation && user.role !== 'owner') {
@@ -1747,7 +1736,12 @@ const StorageService = {
         if (existingReservation && reservationData.catId !== existingReservation.catId) {
             return { success: false, message: 'Kucing pada reservasi tidak dapat diganti.' };
         }
-        if (existingReservation && stays.some(stay => stay.reservationId === existingReservation.id)) {
+
+        const staysResult = readStoredCollection(StorageKeys.BOARDING_STAYS);
+        if (!staysResult.success || !staysResult.value.every(isStoredRecord)) {
+            return { success: false, message: 'Data penitipan tidak dapat dibaca; reservasi tidak disimpan.' };
+        }
+        if (existingReservation && staysResult.value.some(stay => stay.reservationId === existingReservation.id)) {
             return { success: false, message: 'Reservasi yang sudah memiliki riwayat penitipan tidak dapat diedit.' };
         }
         if (existingReservation) {
@@ -1758,9 +1752,6 @@ const StorageService = {
             if (billsResult.value.some(bill => bill.reservationId === existingReservation.id)) {
                 return { success: false, message: 'Reservasi yang sudah ditagihkan tidak dapat diedit.' };
             }
-        }
-        let relatedPickups = [];
-        if (existingReservation) {
             const pickupsResult = readRequiredStoredCollection(StorageKeys.PICKUPS);
             if (!pickupsResult.success) {
                 return {
@@ -1768,7 +1759,7 @@ const StorageService = {
                     message: `${pickupsResult.message} Reservasi tidak diubah.`
                 };
             }
-            relatedPickups = pickupsResult.value.filter(
+            const relatedPickups = pickupsResult.value.filter(
                 pickup => pickup.reservationId === existingReservation.id
             );
             if (hasPickupConfiguration) {
@@ -1793,7 +1784,7 @@ const StorageService = {
             }
         }
 
-        const cat = cats.find(item => item.id === reservationData.catId);
+        const cat = this.getCats().find(item => item.id === reservationData.catId);
         if (!cat || (user.role === 'customer' && cat.ownerId !== user.id)) {
             return { success: false, message: 'Pilih kucing milik akun Anda.' };
         }
@@ -1808,54 +1799,30 @@ const StorageService = {
             return { success: false, message: availability.message };
         }
 
-        let reservationId = existingReservation && existingReservation.id;
-        if (!reservationId) {
-            const ids = new Set(reservations.map(reservation => reservation.id));
-            let attempts = 0;
-            do {
-                reservationId = attempts < 20
-                    ? Utils.generateId('RES')
-                    : `RES-${Date.now()}-${attempts}`;
-                attempts++;
-            } while (ids.has(reservationId));
-        }
-
-        const owner = users.find(item => item.id === cat.ownerId);
-        const reservation = {
-            ...(existingReservation || {}),
-            id: reservationId,
-            catId: cat.id,
-            catName: cat.name,
-            ownerId: cat.ownerId,
-            ownerName: owner ? owner.name : cat.ownerName,
+        const payload = {
+            catId: reservationData.catId,
             checkInDate: reservationData.checkInDate,
-            checkOutDate: reservationData.checkOutDate,
-            status: existingReservation ? existingReservation.status : 'Menunggu Konfirmasi',
-            createdAt: existingReservation ? existingReservation.createdAt : new Date().toISOString().split('T')[0]
+            checkOutDate: reservationData.checkOutDate
         };
-        if (pickupConfiguration) {
-            Object.assign(reservation, pickupConfiguration);
-        } else if (!existingReservation) {
-            Object.assign(reservation, {
-                needPickup: false,
-                pickupType: 'none',
-                pickupAddress: ''
-            });
-        } else if (RESERVATION_PICKUP_FIELDS.every(field =>
-            Object.prototype.hasOwnProperty.call(existingReservation, field)
-        )) {
-            Object.assign(reservation, {
-                needPickup: existingReservation.needPickup,
-                pickupType: existingReservation.pickupType,
-                pickupAddress: existingReservation.pickupAddress
-            });
+        if (pickupConfiguration) Object.assign(payload, pickupConfiguration);
+
+        try {
+            const data = await AppApi.request(
+                existingReservation
+                    ? `/reservations/${encodeURIComponent(existingReservation.id)}`
+                    : '/reservations',
+                { method: existingReservation ? 'PUT' : 'POST', body: payload }
+            );
+            const mirror = readStoredCollection(StorageKeys.RESERVATIONS);
+            const list = mirror.success ? mirror.value : [];
+            const index = list.findIndex(item => item.id === data.reservation.id);
+            if (index >= 0) list[index] = data.reservation;
+            else list.push(data.reservation);
+            writeStoredData(StorageKeys.RESERVATIONS, list);
+            return { success: true, reservation: data.reservation, isNew: !existingReservation };
+        } catch (error) {
+            return { success: false, message: error.message || 'Gagal menyimpan reservasi.' };
         }
-        if (existingReservation) reservations[index] = reservation;
-        else reservations.push(reservation);
-        if (!writeStoredData(StorageKeys.RESERVATIONS, reservations)) {
-            return { success: false, message: 'Gagal menyimpan reservasi. Periksa ruang penyimpanan browser.' };
-        }
-        return { success: true, reservation, isNew: !existingReservation };
     },
     getPickupManagementData() {
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
@@ -1884,7 +1851,10 @@ const StorageService = {
         return { success: true, pickups: data.pickups, reservations, drivers };
     },
     getPickups() { return this.get(StorageKeys.PICKUPS); },
-    createPickup(pickupData) {
+    /**
+     * Fase 5: buat tugas antar-jemput melalui API server, perbarui cermin lokal.
+     */
+    async createPickup(pickupData) {
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
         if (!user || !['owner', 'staff_ops'].includes(user.role)) {
             return { success: false, message: 'Anda tidak memiliki izin membuat tugas antar-jemput.' };
@@ -1896,59 +1866,31 @@ const StorageService = {
             typeof pickupData.scheduledTime !== 'string') {
             return { success: false, message: 'Data tugas antar-jemput tidak valid.' };
         }
-        const data = readPickupOperationCollections();
-        if (!data.success) return data;
-        const reservationMatches = data.reservations.filter(
-            reservation => reservation.id === pickupData.reservationId
-        );
-        if (reservationMatches.length !== 1) {
-            return { success: false, message: 'Reservasi tidak ditemukan atau ID-nya tidak unik.' };
+
+        try {
+            const data = await AppApi.request('/pickups', {
+                method: 'POST',
+                body: {
+                    reservationId: pickupData.reservationId,
+                    type: pickupData.type,
+                    driverId: pickupData.driverId,
+                    address: String(pickupData.address || ''),
+                    scheduledTime: pickupData.scheduledTime
+                }
+            });
+            const mirror = readStoredCollection(StorageKeys.PICKUPS);
+            const pickups = mirror.success ? mirror.value : [];
+            pickups.push(data.pickup);
+            writeStoredData(StorageKeys.PICKUPS, pickups);
+            return { success: true, pickup: data.pickup };
+        } catch (error) {
+            return { success: false, message: error.message || 'Gagal menyimpan tugas antar-jemput.' };
         }
-        const context = getPickupReservationContext(reservationMatches[0], data.cats, data.users);
-        if (!context.success) return context;
-        if (!context.serviceTypes.includes(pickupData.type)) {
-            return { success: false, message: 'Jenis tugas tidak sesuai layanan pada reservasi.' };
-        }
-        if (data.pickups.some(pickup =>
-            pickup.reservationId === pickupData.reservationId && pickup.type === pickupData.type
-        )) {
-            return { success: false, message: 'Tugas untuk reservasi dan jenis layanan tersebut sudah ada.' };
-        }
-        const driverMatches = data.users.filter(driver =>
-            driver.id === pickupData.driverId && driver.role === 'staff_driver'
-        );
-        if (driverMatches.length !== 1 ||
-            typeof driverMatches[0].name !== 'string' || !driverMatches[0].name.trim()) {
-            return { success: false, message: 'Driver tidak ditemukan atau bukan akun staf antar-jemput yang valid.' };
-        }
-        const address = String(pickupData.address || '').trim();
-        const scheduledTime = normalizePickupScheduledTime(pickupData.scheduledTime);
-        if (!address || address.length > 500 || !scheduledTime) {
-            return { success: false, message: 'Alamat atau waktu terjadwal tidak valid.' };
-        }
-        const pickup = {
-            id: this.generateUniqueRecordId('PCK', data.pickups),
-            reservationId: context.reservation.id,
-            catId: context.cat.id,
-            ownerId: context.owner.id,
-            catName: context.cat.name,
-            ownerName: context.owner.name,
-            phone: context.owner.phone || '',
-            type: pickupData.type,
-            address,
-            scheduledTime,
-            status: 'Terjadwal',
-            driverId: driverMatches[0].id,
-            driverName: driverMatches[0].name,
-            notes: ''
-        };
-        data.pickups.push(pickup);
-        if (!writeVerifiedPickupCollection(data.pickups)) {
-            return { success: false, message: 'Tugas gagal disimpan atau verifikasi penyimpanan gagal.' };
-        }
-        return { success: true, pickup };
     },
-    updatePickupAssignment(pickupId, assignmentData) {
+    /**
+     * Fase 5: ubah penugasan tugas antar-jemput melalui API server.
+     */
+    async updatePickupAssignment(pickupId, assignmentData) {
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
         if (!user || !['owner', 'staff_ops'].includes(user.role)) {
             return { success: false, message: 'Anda tidak memiliki izin mengubah penugasan antar-jemput.' };
@@ -1959,58 +1901,25 @@ const StorageService = {
             typeof assignmentData.scheduledTime !== 'string') {
             return { success: false, message: 'Data penugasan antar-jemput tidak valid.' };
         }
-        const data = readPickupOperationCollections();
-        if (!data.success) return data;
-        const pickupMatches = data.pickups
-            .map((pickup, index) => ({ pickup, index }))
-            .filter(item => item.pickup.id === pickupId);
-        if (pickupMatches.length !== 1 || pickupMatches[0].pickup.status !== 'Terjadwal') {
-            return { success: false, message: 'Tugas tidak ditemukan, duplikat, atau sudah tidak dapat diubah.' };
+
+        try {
+            const data = await AppApi.request(`/pickups/${encodeURIComponent(pickupId)}`, {
+                method: 'PUT',
+                body: {
+                    driverId: assignmentData.driverId,
+                    address: assignmentData.address,
+                    scheduledTime: assignmentData.scheduledTime
+                }
+            });
+            const mirror = readStoredCollection(StorageKeys.PICKUPS);
+            const pickups = mirror.success ? mirror.value : [];
+            const index = pickups.findIndex(item => item.id === pickupId);
+            if (index >= 0) pickups[index] = data.pickup;
+            writeStoredData(StorageKeys.PICKUPS, pickups);
+            return { success: true, pickup: data.pickup };
+        } catch (error) {
+            return { success: false, message: error.message || 'Perubahan tugas gagal disimpan.' };
         }
-        const { pickup, index } = pickupMatches[0];
-        const reservationMatches = data.reservations.filter(
-            reservation => reservation.id === pickup.reservationId
-        );
-        if (reservationMatches.length !== 1) {
-            return { success: false, message: 'Reservasi tugas tidak ditemukan atau ID-nya tidak unik.' };
-        }
-        const context = getPickupReservationContext(reservationMatches[0], data.cats, data.users);
-        if (!context.success || !context.serviceTypes.includes(pickup.type)) {
-            return { success: false, message: 'Tugas tidak lagi sesuai dengan layanan reservasi.' };
-        }
-        if (data.pickups.some(item =>
-            item.id !== pickup.id &&
-            item.reservationId === pickup.reservationId &&
-            item.type === pickup.type
-        )) {
-            return { success: false, message: 'Terdapat tugas lain dengan reservasi dan jenis layanan yang sama.' };
-        }
-        const driverMatches = data.users.filter(driver =>
-            driver.id === assignmentData.driverId && driver.role === 'staff_driver'
-        );
-        const address = assignmentData.address.trim();
-        const scheduledTime = normalizePickupScheduledTime(assignmentData.scheduledTime);
-        if (driverMatches.length !== 1 ||
-            typeof driverMatches[0].name !== 'string' || !driverMatches[0].name.trim() ||
-            !address || address.length > 500 || !scheduledTime) {
-            return { success: false, message: 'Driver, alamat, atau waktu terjadwal tidak valid.' };
-        }
-        data.pickups[index] = {
-            ...pickup,
-            catId: context.cat.id,
-            ownerId: context.owner.id,
-            catName: context.cat.name,
-            ownerName: context.owner.name,
-            phone: context.owner.phone || '',
-            address,
-            scheduledTime,
-            driverId: driverMatches[0].id,
-            driverName: driverMatches[0].name
-        };
-        if (!writeVerifiedPickupCollection(data.pickups)) {
-            return { success: false, message: 'Perubahan tugas gagal disimpan atau verifikasi penyimpanan gagal.' };
-        }
-        return { success: true, pickup: data.pickups[index] };
     },
     getSettings() {
         const settings = this.get(StorageKeys.SETTINGS);
@@ -2079,9 +1988,10 @@ const StorageService = {
     },
 
     /**
-     * Menyimpan data kucing baru atau memperbarui data kucing yang ada
+     * Fase 2: simpan kucing melalui API server, lalu perbarui cermin lokal.
+     * Server memvalidasi & menyimpan permanen; mirror hanya cache baca.
      */
-    saveCat(catData) {
+    async saveCat(catData) {
         if (!catData || typeof catData !== 'object') {
             return { success: false, message: 'Data kucing tidak valid.' };
         }
@@ -2090,154 +2000,64 @@ const StorageService = {
             return { success: false, message: 'Anda tidak memiliki izin mengelola data kucing.' };
         }
 
-        const catsResult = readStoredCollection(StorageKeys.CATS);
-        const usersResult = readStoredCollection(StorageKeys.USERS);
-        if (!catsResult.success || !usersResult.success ||
-            ![catsResult, usersResult].every(result => result.value.every(isStoredRecord))) {
-            return { success: false, message: 'Data kucing atau pengguna tidak dapat dibaca; perubahan tidak disimpan.' };
-        }
-        const cats = catsResult.value;
-        const users = usersResult.value;
-        const index = catData.id ? cats.findIndex(cat => cat.id === catData.id) : -1;
-        const existingCat = index >= 0 ? cats[index] : null;
-        if (catData.id && !existingCat) {
-            return { success: false, message: 'Data kucing tidak ditemukan.' };
-        }
-        if (user.role === 'customer' && existingCat && existingCat.ownerId !== user.id) {
-            return { success: false, message: 'Anda tidak berhak mengubah data kucing ini.' };
-        }
-
-        const isNew = !existingCat;
-        let ownerId;
-        let ownerName;
-        if (user.role === 'customer') {
-            ownerId = user.id;
-            ownerName = user.name;
-        } else {
-            ownerId = catData.ownerId || (existingCat && existingCat.ownerId);
-            const owner = users.find(item =>
-                item.id === ownerId && item.role === 'customer'
-            );
-            if (!owner) {
-                return { success: false, message: 'Pilih pemilik kucing yang terdaftar.' };
-            }
-            ownerName = owner.name;
-        }
-
-        const cat = {
-            ...(existingCat || {}),
-            id: existingCat ? existingCat.id : Utils.generateId('CAT'),
+        const isEdit = Boolean(catData.id);
+        const payload = {
             name: String(catData.name || '').trim(),
             breed: String(catData.breed || '').trim(),
-            gender: catData.gender || (existingCat && existingCat.gender) || 'Jantan',
+            gender: catData.gender || 'Jantan',
             age: String(catData.age || '').trim(),
             color: String(catData.color || '').trim(),
-            ownerId,
-            ownerName,
-            photoUrl: existingCat ? existingCat.photoUrl || '' : catData.photoUrl || '',
-            createdAt: existingCat ? existingCat.createdAt : new Date().toISOString().split('T')[0]
+            ownerId: catData.ownerId || '',
+            photoUrl: catData.photoUrl || '',
+            initialCheck: catData.initialCheck
         };
 
-        if (!cat.name || !cat.breed || !cat.age || !cat.color) {
-            return { success: false, message: 'Lengkapi seluruh data identitas kucing.' };
+        try {
+            const data = await AppApi.request(
+                isEdit ? `/cats/${encodeURIComponent(catData.id)}` : '/cats',
+                { method: isEdit ? 'PUT' : 'POST', body: payload }
+            );
+            const catsResult = readStoredCollection(StorageKeys.CATS);
+            const cats = catsResult.success ? catsResult.value : [];
+            const index = cats.findIndex(cat => cat.id === data.cat.id);
+            if (index >= 0) cats[index] = data.cat;
+            else cats.push(data.cat);
+            writeStoredData(StorageKeys.CATS, cats);
+            return { success: true, cat: data.cat, isNew: !isEdit };
+        } catch (error) {
+            return { success: false, message: error.message || 'Gagal menyimpan data kucing.' };
         }
-
-        if (user.role === 'customer') {
-            cat.initialCheck = existingCat ? existingCat.initialCheck : {
-                weight: 0,
-                temperature: 0,
-                parasites: 'Belum Dicatat',
-                vaccinationStatus: 'Belum Dicatat',
-                notes: ''
-            };
-        } else {
-            const initialCheck = catData.initialCheck || {
-                weight: catData.weight,
-                temperature: catData.temperature,
-                parasites: catData.parasites,
-                vaccinationStatus: catData.vaccinationStatus,
-                notes: catData.notes
-            };
-            const weight = Number(initialCheck.weight);
-            const temperature = Number(initialCheck.temperature);
-            if (!Number.isFinite(weight) || weight < 0.5 || weight > 25) {
-                return { success: false, message: 'Berat badan harus berada pada rentang 0.5–25 kg.' };
-            }
-            if (!Number.isInteger(weight * 10)) {
-                return { success: false, message: 'Berat badan harus menggunakan kelipatan 0.1 kg.' };
-            }
-            if (!Number.isFinite(temperature) || temperature < 35 || temperature > 42.5) {
-                return { success: false, message: 'Suhu harus berada pada rentang 35–42.5 °C.' };
-            }
-            if (!Number.isInteger(temperature * 10)) {
-                return { success: false, message: 'Suhu harus menggunakan kelipatan 0.1 °C.' };
-            }
-            if (!String(initialCheck.parasites || '').trim()) {
-                return { success: false, message: 'Kondisi kulit dan parasit wajib dicatat.' };
-            }
-            cat.initialCheck = {
-                weight,
-                temperature,
-                parasites: String(initialCheck.parasites).trim(),
-                vaccinationStatus: String(initialCheck.vaccinationStatus || 'Belum Dicatat').trim(),
-                notes: String(initialCheck.notes || '').trim()
-            };
-        }
-
-        if (isNew) cats.push(cat);
-        else cats[index] = cat;
-        if (!writeStoredData(StorageKeys.CATS, cats)) {
-            return { success: false, message: 'Gagal menyimpan data kucing. Periksa ruang penyimpanan browser.' };
-        }
-        return { success: true, cat, isNew };
     },
 
     /**
-     * Menghapus kucing dari data
+     * Fase 2: hapus kucing melalui API server, lalu perbarui cermin lokal.
+     * Server menolak (409) bila kucing masih memiliki riwayat.
      */
-    deleteCat(catId) {
+    async deleteCat(catId) {
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
         if (!user || !['owner', 'staff_ops', 'customer'].includes(user.role)) {
             return { success: false, message: 'Anda tidak memiliki izin menghapus data kucing.' };
         }
-        const catsResult = readStoredCollection(StorageKeys.CATS);
-        const reservationsResult = readStoredCollection(StorageKeys.RESERVATIONS);
-        const staysResult = readStoredCollection(StorageKeys.BOARDING_STAYS);
-        const reportsResult = readStoredCollection(StorageKeys.DAILY_REPORTS);
-        if (!catsResult.success || !reservationsResult.success ||
-            !staysResult.success || !reportsResult.success ||
-            ![catsResult, reservationsResult, staysResult, reportsResult]
-                .every(result => result.value.every(isStoredRecord))) {
-            return { success: false, message: 'Data kucing atau riwayat terkait tidak dapat dibaca; kucing tidak dihapus.' };
-        }
-        const cats = catsResult.value;
-        const cat = cats.find(item => item.id === catId);
-        if (!cat || (user.role === 'customer' && cat.ownerId !== user.id)) {
-            return { success: false, message: 'Data kucing tidak ditemukan atau bukan milik Anda.' };
-        }
-        const hasReservationHistory = reservationsResult.value.some(reservation => reservation.catId === catId);
-        const hasBoardingHistory = staysResult.value.some(stay => stay.catId === catId);
-        const hasReportHistory = reportsResult.value.some(report => report.catId === catId);
-        if (hasReservationHistory || hasBoardingHistory || hasReportHistory) {
-            return {
-                success: false,
-                message: 'Data kucing tidak dapat dihapus karena memiliki reservasi, riwayat penitipan, atau laporan. Riwayat tersebut perlu dipertahankan.'
-            };
-        }
-        const filtered = cats.filter(c => c.id !== catId);
-        if (filtered.length !== cats.length) {
-            if (!writeStoredData(StorageKeys.CATS, filtered)) {
-                return { success: false, message: 'Data kucing gagal dihapus. Periksa ruang penyimpanan browser.' };
+        try {
+            await AppApi.request(`/cats/${encodeURIComponent(catId)}`, { method: 'DELETE' });
+            const catsResult = readStoredCollection(StorageKeys.CATS);
+            if (catsResult.success) {
+                writeStoredData(StorageKeys.CATS, catsResult.value.filter(cat => cat.id !== catId));
             }
             return { success: true };
+        } catch (error) {
+            return { success: false, message: error.message || 'Gagal menghapus data kucing.' };
         }
-        return { success: false, message: 'Data kucing tidak ditemukan.' };
     },
 
     /**
      * Memperbarui status tugas antar-jemput
      */
-    updatePickupStatus(pickupId, newStatus) {
+    /**
+     * Fase 5: tandai tugas selesai melalui API server (khusus driver terkait).
+     * Mengembalikan boolean seperti pemanggil lama.
+     */
+    async updatePickupStatus(pickupId, newStatus) {
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
         if (!user || user.role !== 'staff_driver' || newStatus !== 'Selesai') return false;
         const pickupsResult = readStoredCollection(StorageKeys.PICKUPS);
@@ -2247,17 +2067,27 @@ const StorageService = {
         if (index === -1 || pickups[index].status !== 'Terjadwal') return false;
         const driversResult = readStoredDriverUsers();
         if (!driversResult.success) return false;
-        if (isPickupAssignedToDriver(pickups[index], user, driversResult.value)) {
-            pickups[index].status = newStatus;
-            return writeStoredData(StorageKeys.PICKUPS, pickups);
+        if (!isPickupAssignedToDriver(pickups[index], user, driversResult.value)) return false;
+
+        try {
+            const data = await AppApi.request(`/pickups/${encodeURIComponent(pickupId)}/status`, {
+                method: 'PUT',
+                body: { status: newStatus }
+            });
+            pickups[index] = data.pickup;
+            writeStoredData(StorageKeys.PICKUPS, pickups);
+            return true;
+        } catch (error) {
+            return false;
         }
-        return false;
     },
 
     /**
-     * Memperbarui status reservasi
+     * Fase 3: ubah status reservasi (owner) melalui API server.
+     * Pengaman lokal (riwayat penitipan/tagihan) dipertahankan karena modul
+     * tersebut belum dimigrasi. Mengembalikan boolean seperti pemanggil lama.
      */
-    updateReservationStatus(reservationId, newStatus) {
+    async updateReservationStatus(reservationId, newStatus) {
         const user = typeof AuthService !== 'undefined' ? AuthService.getCurrentUser() : null;
         if (!user || user.role !== 'owner' || !['Dikonfirmasi', 'Dibatalkan'].includes(newStatus)) return false;
         const reservationsResult = readStoredCollection(StorageKeys.RESERVATIONS);
@@ -2275,11 +2105,23 @@ const StorageService = {
             !(newStatus === 'Dibatalkan' && hasBillingBill) &&
             ((reservations[index].status === 'Menunggu Konfirmasi' && ['Dikonfirmasi', 'Dibatalkan'].includes(newStatus)) ||
                 (reservations[index].status === 'Dikonfirmasi' && newStatus === 'Dibatalkan'));
-        if (validTransition) {
-            reservations[index].status = newStatus;
-            return writeStoredData(StorageKeys.RESERVATIONS, reservations);
+        if (!validTransition) return false;
+
+        try {
+            const data = await AppApi.request(`/reservations/${encodeURIComponent(reservationId)}/status`, {
+                method: 'PUT',
+                body: { status: newStatus }
+            });
+            if (reservationsResult.success) {
+                const mirror = reservationsResult.value;
+                const mirrorIndex = mirror.findIndex(r => r.id === reservationId);
+                if (mirrorIndex >= 0) mirror[mirrorIndex] = data.reservation;
+                writeStoredData(StorageKeys.RESERVATIONS, mirror);
+            }
+            return true;
+        } catch (error) {
+            return false;
         }
-        return false;
     },
 
     /**

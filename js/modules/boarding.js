@@ -315,9 +315,9 @@ const BoardingModule = {
         `;
         const close = () => { modal.innerHTML = ''; };
         modal.querySelectorAll('[data-modal-close]').forEach(button => button.addEventListener('click', close));
-        modal.querySelector('#boarding-checkin-form').addEventListener('submit', event => {
+        modal.querySelector('#boarding-checkin-form').addEventListener('submit', async event => {
             event.preventDefault();
-            const result = StorageService.checkInReservation({
+            const result = await StorageService.checkInReservation({
                 reservationId,
                 kennel: modal.querySelector('#boarding-kennel').value
             });
@@ -331,8 +331,8 @@ const BoardingModule = {
         });
     },
 
-    checkOut(stayId) {
-        const result = StorageService.checkOutBoardingStay(stayId);
+    async checkOut(stayId) {
+        const result = await StorageService.checkOutBoardingStay(stayId);
         if (!result.success) {
             Utils.showToast(result.message, 'error');
             return;
@@ -395,7 +395,7 @@ const BoardingModule = {
         `;
         const close = () => { modal.innerHTML = ''; };
         modal.querySelectorAll('[data-modal-close]').forEach(button => button.addEventListener('click', close));
-        modal.querySelector('#boarding-report-form').addEventListener('submit', event => {
+        modal.querySelector('#boarding-report-form').addEventListener('submit', async event => {
             event.preventDefault();
             const payload = {
                 id: report ? report.id : undefined,
@@ -405,7 +405,7 @@ const BoardingModule = {
             fields.forEach(([name]) => {
                 payload[name] = modal.querySelector(`#report-${name}`).value;
             });
-            const result = StorageService.saveDailyReport(payload);
+            const result = await StorageService.saveDailyReport(payload);
             if (!result.success) {
                 Utils.showToast(result.message, 'error');
                 return;

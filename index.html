@@ -33,45 +33,19 @@
             <div class="auth-body">
                 <!-- VIEW TAB 1: LOGIN -->
                 <div id="auth-login-view">
-                    <!-- Quick Demo Login (Sangat Mudah untuk Pengujian & Presentasi Dosen) -->
-                    <div class="demo-login-box">
-                        <div class="demo-title">
-                            <span>⚡ Quick Demo Login (1-Klik Tanpa Password)</span>
-                        </div>
-                        <div class="demo-buttons-grid">
-                            <button type="button" class="btn-demo btn-demo-owner" data-role="owner">
-                                <span>👑 Dr. Hendra</span>
-                                <span class="role-tag">Owner Pet Hotel</span>
-                            </button>
-                            <button type="button" class="btn-demo btn-demo-ops" data-role="staff_ops">
-                                <span>📋 Siti Rahma</span>
-                                <span class="role-tag">Staf Operasional</span>
-                            </button>
-                            <button type="button" class="btn-demo btn-demo-driver" data-role="staff_driver">
-                                <span>🚗 Doni Pratama</span>
-                                <span class="role-tag">Staf Antar-Jemput</span>
-                            </button>
-                            <button type="button" class="btn-demo btn-demo-cust" data-role="customer">
-                                <span>🐱 Budi Santoso</span>
-                                <span class="role-tag">Pemilik Kucing (Cust)</span>
-                            </button>
-                        </div>
-                    </div>
-
-                    <div class="divider">
-                        <span>atau login dengan email</span>
-                    </div>
-
-                    <!-- Form Login Standar -->
+                    <!-- Form Login -->
                     <form id="form-login">
                         <div class="form-group">
-                            <label for="login-email" class="form-label">Alamat Email <span class="required">*</span></label>
-                            <input type="email" id="login-email" class="form-control" placeholder="contoh: budi@gmail.com" required>
+                            <label for="login-email" class="form-label">Email atau Username <span class="required">*</span></label>
+                            <input type="text" id="login-email" class="form-control" placeholder="contoh: budi@gmail.com atau owner" required autocomplete="username">
+                            <small class="form-helper">Owner/Staf memakai username; pelanggan memakai email.</small>
                         </div>
                         <div class="form-group">
-                            <label for="login-password" class="form-label">Kata Sandi</label>
-                            <input type="password" id="login-password" class="form-control" placeholder="Masukkan kata sandi (opsional pada demo)">
-                            <small class="form-helper">Pada simulasi prototipe lokal, Anda cukup memasukkan email yang terdaftar.</small>
+                            <label for="login-password" class="form-label">Kata Sandi <span class="required">*</span></label>
+                            <div class="password-field">
+                                <input type="password" id="login-password" class="form-control" placeholder="Masukkan kata sandi" required autocomplete="current-password">
+                                <button type="button" class="password-toggle" data-target="login-password" aria-label="Tampilkan kata sandi" aria-pressed="false">👁</button>
+                            </div>
                         </div>
                         <button type="submit" class="btn btn-primary btn-block mt-3">
                             Masuk ke Sistem OMI
@@ -105,6 +79,13 @@
                             <input type="text" id="reg-address" class="form-control" placeholder="Contoh: Jl. Dharmawangsa No. 20, Surabaya">
                             <small class="form-helper">Diperlukan jika menggunakan fasilitas penjemputan/pengantaran kucing.</small>
                         </div>
+                        <div class="form-group">
+                            <label for="reg-password" class="form-label">Kata Sandi <span class="required">*</span></label>
+                            <div class="password-field">
+                                <input type="password" id="reg-password" class="form-control" placeholder="Minimal 6 karakter" minlength="6" required autocomplete="new-password">
+                                <button type="button" class="password-toggle" data-target="reg-password" aria-label="Tampilkan kata sandi" aria-pressed="false">👁</button>
+                            </div>
+                        </div>
 
                         <button type="submit" class="btn btn-primary btn-block mt-3">
                             Daftar Sebagai Pemilik Kucing
@@ -116,7 +97,7 @@
             <!-- Catatan Keterbatasan Prototipe Akademik -->
             <div class="academic-badge">
                 💡 <strong>Prototipe Akademik & Portofolio</strong><br>
-                Simulasi autentikasi frontend berbasis sessionStorage. Kata sandi riil tidak disimpan di browser.
+                Login diverifikasi server (JWT + bcrypt). Token sesi disimpan sementara di sessionStorage browser.
             </div>
         </div>
     </div>
@@ -175,6 +156,7 @@
     <div id="toast-container" class="toast-container"></div>
 
     <!-- Script Logika Aplikasi (Urutan Modular Tanpa Dependensi) -->
+    <script src="js/api.js"></script>
     <script src="js/utils.js"></script>
     <script src="js/storage.js"></script>
     <script src="js/auth.js"></script>
